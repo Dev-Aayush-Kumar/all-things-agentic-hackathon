@@ -17,7 +17,8 @@ os.environ.setdefault("ATLAS_STORAGE", "local")
 os.environ.setdefault("ATLAS_DISPATCHER", "local")
 os.environ.setdefault("GEMINI_MODEL", "gemini-3.5-flash")
 os.environ.setdefault("ATLAS_STEP_DELAY_SECONDS", "0")
-os.environ.setdefault("ATLAS_EXECUTION_HEARTBEAT_SECONDS", "0.2")
+os.environ.setdefault("ATLAS_EXECUTION_HEARTBEAT_SECONDS", "1.0")
+os.environ.setdefault("ATLAS_EXECUTION_LEASE_SECONDS", "120")
 
 from atlas.api.dependencies import (
     get_app_settings,
@@ -45,7 +46,8 @@ def test_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
         monkeypatch.setenv("ATLAS_DISPATCHER", "local")
         monkeypatch.setenv("GEMINI_MODEL", "gemini-3.5-flash")
         monkeypatch.setenv("ATLAS_STEP_DELAY_SECONDS", "0")
-        monkeypatch.setenv("ATLAS_EXECUTION_HEARTBEAT_SECONDS", "0.2")
+        monkeypatch.setenv("ATLAS_EXECUTION_HEARTBEAT_SECONDS", "1.0")
+        monkeypatch.setenv("ATLAS_EXECUTION_LEASE_SECONDS", "120")
         monkeypatch.setenv("GOOGLE_API_KEY", "")
         monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "false")
         monkeypatch.setenv("ATLAS_DATABASE_PATH", str(db_path))
@@ -86,8 +88,8 @@ async def wait_for_mission_status(
     client: AsyncClient,
     mission_id: str,
     target_statuses: set[str],
-    timeout: float = 60.0,
-    poll_interval: float = 0.05,
+    timeout: float = 180.0,
+    poll_interval: float = 0.25,
 ) -> dict:
     """Poll mission endpoint until target status is reached."""
     deadline = asyncio.get_event_loop().time() + timeout

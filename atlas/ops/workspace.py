@@ -12,6 +12,7 @@ from atlas.config.settings import Settings
 from atlas.domain.enums import PlannerSource
 from atlas.domain.models import DatasetProfile, Mission
 from atlas.ops.registry import AgentRegistry
+from atlas.storage.base import DatasetStorage
 
 PersistFn = Callable[[], Awaitable[None]]
 
@@ -31,6 +32,7 @@ class MissionWorkspace:
     tool_results: list[ToolResult] = field(default_factory=list)
     inspected_columns: set[str] = field(default_factory=set)
     step_delay_seconds: float = 0.0
+    dataset_storage: DatasetStorage | None = None
 
     @property
     def profile(self) -> DatasetProfile | None:

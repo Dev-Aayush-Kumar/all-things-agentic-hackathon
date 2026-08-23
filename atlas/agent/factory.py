@@ -2,10 +2,12 @@
 
 import logging
 
+from atlas.agent.adk_decider import AdkDecisionMaker
 from atlas.agent.adk_planner import AdkMissionPlanner
 from atlas.agent.adk_reasoner import AdkInvestigationReasoner
 from atlas.agent.adk_selector import select_tools_with_adk
 from atlas.agent.base import MissionPlanner
+from atlas.agent.local_decider import LocalDecisionMaker
 from atlas.agent.local_planner import LocalFallbackPlanner
 from atlas.agent.local_reasoner import LocalFallbackReasoner
 from atlas.agent.policy import select_tools
@@ -84,3 +86,16 @@ async def resolve_initial_tools(goal: str, settings: Settings) -> tuple[list[str
     selected = select_tools(goal)
     logger.info("Local policy selected investigation tools: %s", selected)
     return selected, PlannerSource.LOCAL_FALLBACK
+
+
+def create_decision_maker(settings: Settings):
+    """Create the supervisor decision-maker. Local fallback is never labeled Gemini."""
+    backend = settings.resolved_planner_backend
+    if backend == PlannerBackend.ADK and settings.adk_configured:
+        logger.info(
+            "Using REAL_GEMINI_ADK supervisor decision-maker with model=%s",
+            settings.gemini_model,
+        )
+        return AdkDecisionMaker(settings)
+    logger.info("Using LOCAL_FALLBACK supervisor decision-maker")
+    return LocalDecisionMaker()

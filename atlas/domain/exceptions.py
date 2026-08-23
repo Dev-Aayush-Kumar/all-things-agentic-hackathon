@@ -62,6 +62,42 @@ class CloudDispatchNotConfiguredError(Exception):
         super().__init__(message)
 
 
+class ActionAuthorizationError(Exception):
+    """Raised when an agent is not allowed to execute an action."""
+
+
+class ActionValidationError(Exception):
+    """Raised when action parameters are missing or invalid."""
+
+
+class UnknownActionError(Exception):
+    """Raised when an action type is not registered."""
+
+
+class ModelDecisionError(Exception):
+    """Raised when a model decision is missing, malformed, or not allowlisted."""
+
+
+class UnknownExternalToolError(Exception):
+    """Raised when an external capability is not registered."""
+
+
+class ExternalToolAuthorizationError(Exception):
+    """Raised when a registered external tool is not authorized for this mission."""
+
+
+class ExternalToolValidationError(Exception):
+    """Raised when external-tool arguments or destination policy fail."""
+
+
+class ExternalToolExecutionError(Exception):
+    """Raised when a registered external tool fails during execution."""
+
+
+class ActionExecutionError(Exception):
+    """Raised when a registered action fails during execution or verification."""
+
+
 class MissionNotExecutableError(Exception):
     """Raised when a worker message refers to a mission that cannot be run."""
 

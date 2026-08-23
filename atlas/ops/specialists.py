@@ -12,14 +12,24 @@ from atlas.domain.models import (
     SpecialistFollowUp,
     SpecialistTask,
     SpecialistTaskResult,
+    public_action,
+    public_working_copy,
 )
 from atlas.investigation.pipeline import InvestigationResult
 from atlas.investigation.prioritize import prioritize_findings
 from atlas.investigation.report import build_report
+from atlas.ops.actions.executor import ActionContext, ActionExecutor
+from atlas.ops.actions.registry import (
+    ACTION_CAPABILITIES,
+    CAPABILITY_TO_ACTION,
+    default_action_registry,
+    make_idempotency_key,
+)
 from atlas.ops.registry import (
     CAPABILITY_SYNTHESIZE,
     DATA_ANALYST_ID,
     INVESTIGATOR_ID,
+    REMEDIATOR_ID,
     REPORTER_ID,
 )
 from atlas.ops.tooling import run_authorized_tool, tool_already_completed
@@ -65,6 +75,7 @@ class DataAnalystAgent:
             if key != "adaptive"
         }
         adaptive = bool(task.inputs.get("adaptive", False))
+        reobserve = bool(task.inputs.get("reobserve", False))
         if tool_already_completed(workspace.mission, tool_name, arguments):
             logger.info(
                 "Skipping completed analyst tool mission=%s tool=%s",
@@ -83,6 +94,7 @@ class DataAnalystAgent:
             arguments=arguments,
             adaptive=adaptive,
             specialist_task_id=task.task_id,
+            reobserve=reobserve,
         )
         return SpecialistTaskResult(
             summary=result.summary,
@@ -242,6 +254,10 @@ class ReporterAgent:
             overall_assessment=reasoning.overall_assessment,
             recommended_actions=reasoning.recommended_actions,
             reasoning_source=reasoning.source,
+            actions_performed=[public_action(item) for item in workspace.mission.actions],
+            working_copy=public_working_copy(workspace.mission.working_copy),
+            remaining_issues=[finding.title for finding in ranked],
+            evidence_records=list(workspace.mission.evidence_records),
         )
         workspace.mission.investigation_report.interpretations = list(
             workspace.mission.interpretations
@@ -256,6 +272,135 @@ class ReporterAgent:
             notes=reasoning.overall_assessment,
             provenance=reasoning.source,
         )
+
+
+class RemediatorAgent:
+    """Executes allowlisted remediations. Never runs observation tools."""
+
+    def __init__(self, descriptor: AgentDescriptor) -> None:
+        self._descriptor = descriptor
+        self._executor = ActionExecutor(default_action_registry())
+
+    @property
+    def descriptor(self) -> AgentDescriptor:
+        return self._descriptor
+
+    async def execute(
+        self, task: SpecialistTask, workspace: MissionWorkspace
+    ) -> SpecialistTaskResult:
+        if task.capability not in ACTION_CAPABILITIES:
+            raise PermissionError(
+                f"REMEDIATOR cannot execute capability '{task.capability}'"
+            )
+        if workspace.dataset_storage is None:
+            raise RuntimeError("Remediation requires dataset storage for working copies")
+
+        from atlas.domain.enums import ActionStatus, AgentPhase
+        from atlas.domain.models import ActionRecord
+
+        action_type = task.inputs.get("action_type") or CAPABILITY_TO_ACTION.get(
+            task.capability
+        )
+        if not isinstance(action_type, str):
+            raise PermissionError("Remediator task is missing a registered action_type")
+        parameters = task.inputs.get("parameters")
+        if not isinstance(parameters, dict):
+            parameters = {
+                key: value
+                for key, value in task.inputs.items()
+                if key not in {"action_type", "parameters", "adaptive", "reobserve"}
+            }
+        input_version = (
+            workspace.mission.working_copy.current_version
+            if workspace.mission.working_copy is not None
+            else 0
+        )
+        key = make_idempotency_key(
+            mission_id=workspace.mission.mission_id,
+            action_type=action_type,
+            parameters=parameters,
+            input_version=input_version,
+        )
+        record = next(
+            (item for item in workspace.mission.actions if item.idempotency_key == key),
+            None,
+        )
+        if record is None:
+            record = next(
+                (item for item in workspace.mission.actions if item.task_id == task.task_id),
+                None,
+            )
+        if record is None:
+            record = ActionRecord(
+                mission_id=workspace.mission.mission_id,
+                task_id=task.task_id,
+                agent_id=self._descriptor.id,
+                action_type=action_type,
+                objective=task.objective,
+                parameters=parameters,
+                status=ActionStatus.PROPOSED,
+                provenance=workspace.plan_source
+                if workspace.plan_source == PlannerSource.LOCAL_FALLBACK
+                else PlannerSource.LOCAL_FALLBACK,
+                max_attempts=workspace.settings.action_max_attempts,
+                idempotency_key=key,
+                input_version=input_version,
+            )
+            workspace.mission.actions.append(record)
+        else:
+            record.task_id = task.task_id
+            record.parameters = parameters
+            record.input_version = input_version
+            record.idempotency_key = key
+
+        workspace.mission.current_phase = AgentPhase.ACTING
+        action_context = ActionContext(
+            mission=workspace.mission,
+            agent_id=self._descriptor.id,
+            storage=workspace.dataset_storage,
+            frame=workspace.tool_context.frame,
+            persist=workspace.persist,
+            task_id=task.task_id,
+        )
+        record = await self._executor.execute(record, action_context)
+        workspace.tool_context.frame = action_context.frame
+
+        workspace.mission.current_phase = AgentPhase.VERIFYING
+        version = (
+            workspace.mission.working_copy.current_version
+            if workspace.mission.working_copy is not None
+            else 0
+        )
+        follow_ups = _reobserve_follow_ups(action_type, version)
+        summary = record.result.summary if record.result else "Action verified"
+        return SpecialistTaskResult(
+            summary=summary,
+            follow_ups=follow_ups,
+            notes=f"action_id={record.action_id} version={record.output_version}",
+            provenance=PlannerSource.LOCAL_FALLBACK,
+        )
+
+
+def _reobserve_follow_ups(action_type: str, working_version: int) -> list[SpecialistFollowUp]:
+    from atlas.agent.tools import ANALYZE_DUPLICATES, ANALYZE_MISSING, PROFILE_DATASET
+
+    tools = [PROFILE_DATASET]
+    if action_type == "REMOVE_DUPLICATES":
+        tools.extend([ANALYZE_DUPLICATES, ANALYZE_MISSING])
+    else:
+        tools.append(ANALYZE_MISSING)
+    return [
+        SpecialistFollowUp(
+            capability=tool,
+            objective=f"Re-measure {tool} on working copy v{working_version}",
+            arguments={
+                "reobserve": True,
+                "working_version": working_version,
+            },
+            reason="Verification succeeded; supervisor must observe the updated working copy",
+        )
+        for tool in tools
+    ]
 
 
 def _related_column_follow_ups(
@@ -287,4 +432,5 @@ def build_specialists(registry) -> dict[str, SpecialistAgent]:
         DATA_ANALYST_ID: DataAnalystAgent(registry.get(DATA_ANALYST_ID)),
         INVESTIGATOR_ID: InvestigatorAgent(registry.get(INVESTIGATOR_ID)),
         REPORTER_ID: ReporterAgent(registry.get(REPORTER_ID)),
+        REMEDIATOR_ID: RemediatorAgent(registry.get(REMEDIATOR_ID)),
     }

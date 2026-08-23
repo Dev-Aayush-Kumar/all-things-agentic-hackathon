@@ -11,7 +11,7 @@ from atlas.agent.tools import ToolContext
 from atlas.config.settings import Settings
 from atlas.domain.enums import EventType, ExecutionState, MissionStatus, StepStatus
 from atlas.domain.exceptions import DatasetParseError, StaleExecutionError
-from atlas.domain.models import Mission, MissionEvent, utc_now
+from atlas.domain.models import Mission, MissionEvent, WorkingCopyState, utc_now
 from atlas.execution.context import ExecutionContext
 from atlas.investigation.parser import parse_csv_bytes
 from atlas.persistence.base import MissionRepository
@@ -173,8 +173,19 @@ class MissionWorkflowRunner:
         if dataset is None:
             raise RuntimeError(f"Dataset '{mission.dataset_id}' was not found")
 
+        if mission.working_copy is None:
+            mission.working_copy = WorkingCopyState(
+                source_dataset_id=dataset.dataset_id,
+                source_stored_filename=dataset.stored_filename,
+                source_original_filename=dataset.original_filename,
+            )
+        load_name = (
+            mission.working_copy.current_filename()
+            if mission.working_copy.current_version > 0
+            else dataset.stored_filename
+        )
         try:
-            content = await self._dataset_storage.load(dataset.stored_filename)
+            content = await self._dataset_storage.load(load_name)
             frame = await asyncio.to_thread(parse_csv_bytes, content)
         except DatasetParseError:
             raise
@@ -194,10 +205,17 @@ class MissionWorkflowRunner:
         )
         await self._persist(mission)
 
-        selected_tools, plan_source = await resolve_initial_tools(
-            mission.goal, self._settings
-        )
+        from atlas.agent.factory import create_decision_maker
         from atlas.ops.supervisor import Supervisor
+
+        decision_maker = create_decision_maker(self._settings)
+        if decision_maker.drives_initial_plan:
+            selected_tools: list[str] | None = None
+            plan_source = decision_maker.source
+        else:
+            selected_tools, plan_source = await resolve_initial_tools(
+                mission.goal, self._settings
+            )
 
         supervisor = Supervisor(
             reasoner=self._reasoner,
@@ -205,6 +223,8 @@ class MissionWorkflowRunner:
             plan_source=plan_source,
             selected_tools=selected_tools,
             step_delay_seconds=self._step_delay_seconds,
+            dataset_storage=self._dataset_storage,
+            decision_maker=decision_maker,
         )
         context = ToolContext(
             dataset_id=dataset.dataset_id,

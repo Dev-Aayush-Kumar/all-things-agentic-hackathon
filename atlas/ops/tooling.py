@@ -22,7 +22,7 @@ from atlas.agent.tools import (
     ToolSecurityError,
     invoke_tool,
 )
-from atlas.domain.enums import EventType, StepStatus
+from atlas.domain.enums import EventType, FindingCategory, StepStatus
 from atlas.domain.models import (
     AgentTask,
     EvidenceRecord,
@@ -44,6 +44,14 @@ TOOL_COMPLETION_EVENTS = {
     ANALYZE_CONSISTENCY: EventType.CONSISTENCY_ANALYSIS_COMPLETED,
 }
 
+_TOOL_FINDING_CATEGORY = {
+    ANALYZE_MISSING: FindingCategory.MISSING_DATA,
+    ANALYZE_DUPLICATES: FindingCategory.DUPLICATE_ROWS,
+    ANALYZE_TYPE_FORMAT: FindingCategory.TYPE_FORMAT_ANOMALY,
+    ANALYZE_OUTLIERS: FindingCategory.NUMERIC_OUTLIER,
+    ANALYZE_CONSISTENCY: FindingCategory.CONSISTENCY_VIOLATION,
+}
+
 
 async def run_authorized_tool(
     workspace: MissionWorkspace,
@@ -53,10 +61,17 @@ async def run_authorized_tool(
     arguments: dict | None = None,
     adaptive: bool = False,
     specialist_task_id: str | None = None,
+    reobserve: bool = False,
 ) -> ToolResult:
     """Execute a tool only if the specialist's descriptor allows it."""
     workspace.registry.authorize_tool(agent_id, tool_name)
     arguments = arguments or {}
+    reobserve = reobserve or bool(arguments.get("reobserve"))
+    invoke_arguments = {
+        key: value
+        for key, value in arguments.items()
+        if key not in {"adaptive", "reobserve", "working_version"}
+    }
     mission = workspace.mission
 
     async with workspace.lock:
@@ -99,7 +114,7 @@ async def run_authorized_tool(
 
     try:
         result = await asyncio.to_thread(
-            invoke_tool, workspace.tool_context, tool_name, **arguments
+            invoke_tool, workspace.tool_context, tool_name, **invoke_arguments
         )
     except (ToolSecurityError, ToolExecutionError, PermissionError) as exc:
         async with workspace.lock:
@@ -126,6 +141,12 @@ async def run_authorized_tool(
             finding_ids=[finding.finding_id for finding in result.findings],
         )
         mission.evidence_records.append(evidence)
+        if reobserve:
+            category = _TOOL_FINDING_CATEGORY.get(tool_name)
+            if category is not None:
+                mission.findings = [
+                    finding for finding in mission.findings if finding.category != category
+                ]
         if result.findings:
             existing = {item.finding_id for item in mission.findings}
             mission.findings.extend(

@@ -2,9 +2,9 @@
 
 **Autonomous Task & Lifecycle Agent System**
 
-ATLAS is an autonomous operations agent built for the Google All Things Agentic Hackathon 2026. It accepts a high-level goal, plans work, investigates uploaded CSV datasets with allowlisted tools, and produces an evidence-based report.
+ATLAS is an autonomous operations agent built for the Google All Things Agentic Hackathon 2026. It accepts a high-level goal, plans work, investigates uploaded CSV datasets with allowlisted tools, can apply **controlled remediations** to a working copy, and produces an evidence-based report.
 
-Round 6 adds a **real multi-agent operations layer**: a supervisor delegates bounded work to DATA_ANALYST, INVESTIGATOR, and REPORTER specialists, observes evidence, and replans. Round 5's Google Cloud path and Gemini/ADK integration remain.
+Round 9 adds a **controlled external tool layer**. The model may propose `FETCH_URL`; ATLAS validates, authorizes, and executes the registered implementation. Dataset-only missions still work without any network call. Rounds 5–8 remain.
 
 ## Problem
 
@@ -14,14 +14,17 @@ ATLAS inverts that model for dataset missions:
 
 1. Upload a CSV dataset.
 2. Create a mission with a high-level investigation goal and `dataset_id`.
-3. A supervisor decides which specialists should do which work, delegates tasks, inspects structured evidence, and may replan.
-4. Facts come from allowlisted tools. Interpretation comes from the reporter. Those layers stay separate.
+3. A supervisor asks a typed decision-maker what to do next. Gemini/ADK when configured; deterministic local fallback otherwise.
+4. ATLAS validates every decision against the capability catalog, Agent Registry, Action Registry, and External Tool Registry.
+5. If a remediation is authorized, it runs only on a working copy — never the uploaded original — and must pass postcondition verification.
+6. If an external capability is authorized, ATLAS executes the registered tool and stores a bounded evidence excerpt with provenance.
+7. Facts come from allowlisted observation tools. External pages are labeled separately and never silently override dataset measurements. Decisions come from the model or local policy. Execution stays inside ATLAS.
 
 ## What makes ATLAS agentic
 
 ATLAS is agentic because a supervisor runs a bounded decision loop:
 
-**MISSION → UNDERSTAND → DELEGATION PLAN → SPECIALISTS → TOOLS → EVIDENCE → OBSERVE → REPLAN / CONTINUE → SYNTHESIZE**
+**MISSION → MODEL DECISION → ATLAS VALIDATES → ATLAS EXECUTES → ATLAS OBSERVES → MODEL SEES EVIDENCE → MODEL DECIDES AGAIN → REPORT**
 
 That loop:
 
@@ -37,25 +40,31 @@ That loop:
 ## Architecture
 
 ```
-User
- ↓
-Mission API
- ↓
-Durable Mission Worker
- ↓
+MISSION GOAL + STRUCTURED CONTEXT
+        ↓
+Gemini / local decision-maker
+        ↓  typed DELEGATE | OBSERVE | ACTION | EXTERNAL | COMPLETE
+ATLAS validates (catalog + registries + limits)
+        ↓
+ATLAS executes specialists / tools / actions / registered external tools
+        ↓
+Structured evidence (never raw CSV or raw HTML to the model)
+        ↓
+Supervisor feeds evidence back
+        ↓
+Next typed decision or COMPLETE
+```
+
+Gemini is the decision-maker when configured. ATLAS is the enforcement and execution environment. Gemini never executes HTTP, shell, or Python. The model cannot bypass registries, verification, or loop limits.
+
+Specialists remain role-scoped:
+
+```
 Supervisor
- ↓
-Delegation Manager
- ↓
-Specialized Agents (DATA_ANALYST / INVESTIGATOR / REPORTER)
- ↓
-Allowlisted Tools
- ↓
-Evidence
- ↓
-Supervisor Replanning
- ↓
-Final Synthesis
+ ├─ DATA_ANALYST   observation tools only
+ ├─ INVESTIGATOR   evidence interpretation / inspect_column
+ ├─ REMEDIATOR     allowlisted dataset actions only
+ └─ REPORTER       synthesis only
 ```
 
 Cloud deployment still wraps this loop:
@@ -112,10 +121,11 @@ The durable worker does not run a hardcoded `analyst → investigator → report
 6. Replan when results justify more work.
 7. Ask the reporter to synthesize only after analysis work is complete enough.
 
-| Specialist | Responsibility | Tools |
-|------------|----------------|-------|
-| DATA_ANALYST | Profile and measure quality issues | Full investigation allowlist |
+| Specialist | Responsibility | Tools / actions |
+|------------|----------------|-----------------|
+| DATA_ANALYST | Profile and measure quality issues | Full investigation allowlist (observation) |
 | INVESTIGATOR | Connect findings and decide if more investigation is needed | `inspect_column` only |
+| REMEDIATOR | Execute allowlisted remediations on a working copy | No observation tools. Actions only via the Action Registry |
 | REPORTER | Prioritize findings and write the final report | None (interpretation only) |
 
 Independent analyst measurements that only depend on the profile (for example missingness and duplicates) can run concurrently. A task does not start until its dependencies are `COMPLETED`.
@@ -124,7 +134,56 @@ Adaptive example: a duplicates-only goal does **not** start with outlier analysi
 
 Delegation plans and specialist task states are stored on the mission document (SQLite JSON payload or Firestore). If a worker dies, recovery reclaims the mission lease and the supervisor resumes: `COMPLETED` specialist tasks are not rerun; `IN_PROGRESS` tasks return to `PENDING`.
 
-`GET /missions/{id}` exposes `delegation_plan`, `current_objective`, specialist task results, and the existing `agent_plan` / evidence / report fields. It does not expose secrets or filesystem paths.
+`GET /missions/{id}` exposes `delegation_plan`, `current_objective`, specialist task results, `actions`, `working_copy`, `reasoning_trace`, `external_invocations`, and the existing `agent_plan` / evidence / report fields. It does not expose secrets, raw internals, or filesystem paths.
+
+## External tools
+
+Gemini (or local fallback) may propose a registered external capability. ATLAS remains the only component that talks to the network.
+
+```
+Model proposes EXTERNAL FETCH_URL
+        ↓
+Typed decision validation
+        ↓
+External Tool Registry (known?)
+        ↓
+Policy (enabled? authorized for this mission? budget?)
+        ↓
+URL / network guard (scheme, allowlist, private/loopback/link-local)
+        ↓
+ATLAS executes FETCH_URL
+        ↓
+Bounded structured evidence + provenance
+        ↓
+Next reasoning iteration sees an excerpt, not HTML
+```
+
+Registered in this round:
+
+| Capability | Model may supply | ATLAS controls |
+|------------|------------------|----------------|
+| `FETCH_URL` | `url` only | headers, cookies, auth, timeout, redirects, size limit, User-Agent |
+
+Configuration (fail closed):
+
+- `ATLAS_EXTERNAL_TOOLS_ENABLED` / `ATLAS_FETCH_URL_ENABLED`
+- `ATLAS_FETCH_ALLOWED_DOMAINS` — empty means **no host is authorized**
+- `ATLAS_FETCH_ALLOWED_SCHEMES` (default `https,http`)
+- `ATLAS_FETCH_TIMEOUT_SECONDS`, `ATLAS_FETCH_MAX_BYTES`, `ATLAS_FETCH_MAX_REDIRECTS`
+- `ATLAS_FETCH_ALLOW_LOOPBACK` — default `false`. Loopback is allowed only when this is true **and** the host is on the domain allowlist (intended for tests)
+
+Local fallback proposes `FETCH_URL` only when the mission goal contains a URL whose host is already on the allowlist, and only after a dataset profile exists. It does not fetch arbitrary URLs.
+
+Dataset-only missions never need this layer.
+
+### SSRF limitations (honest)
+
+ATLAS rejects localhost, loopback, link-local, private, CGNAT, and unspecified addresses after DNS resolution, and re-validates every redirect hop. This is not a perfect SSRF shield:
+
+- There is a TOCTOU gap between DNS resolution and the TCP/TLS connect (DNS rebinding).
+- ATLAS does not pin the connection to the pre-resolved IP (doing so would break ordinary TLS SNI).
+- Rare hostname encodings that the resolver treats as public may still be attempted; unknown schemes are rejected.
+- `ATLAS_FETCH_ALLOW_LOOPBACK` is an explicit test/dev escape hatch and must stay off in production.
 
 ## Gemini / Google ADK
 
@@ -133,9 +192,13 @@ Hackathon requirement: **Gemini 3.5 or newer**.
 - Model name is configured with `GEMINI_MODEL` (default `gemini-3.5-flash`).
 - ATLAS never silently replaces a configured model with an older one.
 - If the configured model is below 3.5, diagnostics set `gemini_meets_minimum=false` and a warning is logged. The exact name is still sent to the SDK.
-- When credentials exist, planning, initial tool selection, and finding interpretation use Google ADK (`REAL_GEMINI_ADK`).
-- Tool **execution** stays inside ATLAS. The model cannot run arbitrary tools, read files, or bypass the allowlist.
-- When credentials are missing, the local fallback is used and labeled `LOCAL_DEVELOPMENT_FALLBACK`. It is never labeled as Gemini.
+- When credentials exist, planning, tool selection, supervisor decisions, and finding interpretation use Google ADK (`REAL_GEMINI_ADK` / `GEMINI_ADK`).
+- The supervisor asks Gemini for a **typed** decision (`DELEGATE`, `OBSERVE`, `ACTION`, `EXTERNAL`, `COMPLETE`). Malformed output is rejected, not guessed.
+- Tool, action, and external **execution** stay inside ATLAS. The model cannot run arbitrary tools, fetch arbitrary URLs, read files, write the source dataset, or bypass the allowlists.
+- Gemini proposing an action is not authorization. ATLAS still runs ActionRegistry, parameter checks, execution, and postcondition verification.
+- Structured evidence (counts, findings, verification) is fed back into the next reasoning iteration. The raw CSV is not sent to Gemini.
+- When Gemini is unavailable, `LocalDecisionMaker` implements the same typed contract from deterministic policy and is labeled `LOCAL_FALLBACK`. It is never labeled as Gemini.
+- A live Gemini failure on one iteration falls back to the local decider for that step and records the failure.
 
 Transports:
 
@@ -212,18 +275,93 @@ Tools return structured evidence. They do not interpret impact. `inspect_column`
 
 Adaptive follow-up is evidence-driven (extreme numeric range → outliers; highly missing columns → inspect; type anomalies → inspect). These branches do not always fire.
 
+## Observation vs action
+
+**Observation** tools gather evidence. They do not change the dataset.
+
+**Action** tools change a controlled working copy. They are a separate allowlist.
+
+| | Observation | Action |
+|--|-------------|--------|
+| Purpose | Measure | Change |
+| Who may run it | DATA_ANALYST / INVESTIGATOR (scoped tools) | REMEDIATOR only |
+| Target | In-memory bound dataset / current working frame | Working copy only |
+| Success | Structured evidence recorded | Postcondition **verified** |
+
+Gemini never sits on the action execution path. The model may propose or interpret. ATLAS validates authorization and parameters, executes, and verifies.
+
+### Action registry and authorization
+
+Every action declares identity, description, input schema, output schema, risk, and allowed agents. Unknown actions, unauthorized agents, and malformed parameters are rejected before any bytes are written.
+
+Registered remediations in this round:
+
+| Action | Effect | Verification |
+|--------|--------|--------------|
+| `REMOVE_DUPLICATES` | `drop_duplicates(keep="first")` on the working copy | Duplicate count is 0 and row count equals the prior unique count |
+| `FILL_MISSING_VALUES` | Fill one named column (`auto`: numeric median or `UNKNOWN`) | That column has 0 missing values and the row count is unchanged |
+
+ATLAS does **not** run every remediation. The supervisor proposes an action only when:
+
+1. The mission goal explicitly asks to fix / remediate / clean / repair (not “what should be fixed first”).
+2. Current evidence justifies that specific action (duplicate rows, or material missingness ≥ 20%).
+3. Mission action limits have not been reached (`ATLAS_MAX_ACTIONS`, default 4).
+
+### Working copies
+
+```
+SOURCE DATASET
+    ↓
+IMMUTABLE ORIGINAL
+    ↓
+WORKING COPY v1, v2, …   ← controlled transformations
+```
+
+The uploaded source file is never overwritten. Each verified action writes a new generated basename (`wcopy_{mission_id}_vN.csv`) and records version metadata, parent version, and the action that created it. Later actions read the latest verified version.
+
+### Verification, failure, and idempotency
+
+Success is not “the function returned.” Success is a recorded before/after state whose postcondition passed.
+
+If verification fails:
+
+- the original source stays untouched
+- the working-copy version is not advanced
+- the action is `VERIFICATION_FAILED`
+- the specialist task may retry up to `ATLAS_ACTION_MAX_ATTEMPTS` (default 2)
+- the supervisor may continue without treating the action as successful
+
+Idempotency key: `sha256(mission_id + action_type + canonical parameters + input_version)`. A verified key is reused and does not write another version. A worker crash during `RUNNING` resets the action to `PROPOSED` and retries from the last **verified** working copy.
+
+Recovery of the durable mission lease is unchanged. Completed remediator tasks are not rerun. Interrupted actions retry safely; they do not claim transactional filesystem semantics.
+
+### Supervisor action loop
+
+```
+UNDERSTAND → PLAN → DELEGATE → OBSERVE → DECIDE
+ → ACT → VERIFY → OBSERVE → REPLAN → ACT AGAIN OR COMPLETE → REPORT
+```
+
+Existing mission / agent iteration, tool-call, and runtime limits still apply. Actions have their own cap. The loop stops when the objective is satisfied, a limit is hit, or a critical specialist cannot finish.
+
+Local execution of actions is fully functional (SQLite + local files). Cloud workers reuse the same `ActionExecutor` and persist working-copy bytes through the existing Storage interface (GCS) and mission document (Firestore). There is no second broker.
+
 ## Safety boundaries
 
-Agent tools cannot:
+Agent tools and actions cannot:
 
 - run shell commands
-- evaluate arbitrary Python
+- evaluate arbitrary Python (`eval` / `exec`)
+- make arbitrary HTTP requests
 - read filesystem paths or GCS bucket paths chosen by the model
+- overwrite the uploaded source dataset
+- write unrestricted files or databases
 - read environment secrets
 - inspect columns that are not in the mission dataset
-- accept arguments outside a per-tool allowlist
+- accept arguments outside a per-tool or per-action allowlist
+- send email, make payments, or touch production systems
 
-The dataset is bound in-memory as `ToolContext`. Object names in Cloud Storage are generated basenames under a configured prefix. Loop limits cap iterations, tool calls, and runtime.
+The dataset is bound in-memory as `ToolContext`. Actions write only generated working-copy basenames through `DatasetStorage`. Object names in Cloud Storage stay under a configured prefix. Loop limits cap iterations, tool calls, runtime, and actions.
 
 ## Technology stack
 
@@ -241,7 +379,7 @@ The dataset is bound in-memory as `ToolContext`. Object names in Cloud Storage a
 atlas/
 ├── api/routes/           # /health, /ready, /datasets, /missions, Pub/Sub push
 ├── agent/                # Tools, policy, planner, reasoner (ADK / local)
-├── ops/                  # Supervisor, registry, delegation, specialists
+├── ops/                  # Supervisor, registry, delegation, specialists, actions
 ├── investigation/        # Deterministic CSV analyzers used by tools
 ├── storage/              # Local filesystem or Cloud Storage
 ├── persistence/          # SQLite or Firestore
@@ -290,6 +428,7 @@ Useful variables (see `.env.example` for the full set):
 ATLAS_RUNTIME_MODE=local
 PLANNER_BACKEND=auto
 GEMINI_MODEL=gemini-3.5-flash
+ATLAS_MAX_ACTIONS=4
 ```
 
 To use real Gemini locally without Cloud backends:
@@ -445,6 +584,42 @@ If that flag is unset, those tests are skipped.
 - Mission recovery resumes from completed specialist tasks
 - `GET /missions/{id}` exposes delegation plan and specialist task state
 
+### Round 7
+
+- First-class `ActionRecord` / verification / working-copy models
+- Action Registry with authorization and parameter schemas
+- REMEDIATOR specialist; observation vs action are separate allowlists
+- `REMOVE_DUPLICATES` and `FILL_MISSING_VALUES` operate only on working copies
+- Original uploads remain immutable
+- Mandatory verification; failed postconditions do not advance the working copy
+- Bounded retry and idempotent re-execution after worker interruption
+- Supervisor proposes actions from evidence + goal, then re-observes
+- `GET /missions/{id}` exposes actions, verification, and working-copy version
+- Action lifecycle events (`ACTION_PROPOSED` … `REPLAN_AFTER_ACTION`)
+
+### Round 8
+
+- Typed supervisor decisions (`DELEGATE`, `OBSERVE`, `ACTION`, `COMPLETE`)
+- Machine-readable capability catalog exposed to the decision-maker
+- Gemini/ADK drives the supervisor loop when configured; ATLAS still validates and executes
+- Local fallback implements the same decision contract and is labeled `LOCAL_FALLBACK`
+- Structured evidence is fed back into the next reasoning iteration
+- Repeated identical decisions and model-call counts are bounded
+- `GET /missions/{id}` exposes `reasoning_trace`
+- Events: `MODEL_REASONING_STARTED`, `MODEL_DECISION_RECEIVED`, `MODEL_DECISION_VALIDATED`, `MODEL_DECISION_REJECTED`, `SPECIALIST_DELEGATED`, `OBSERVATION_REQUESTED`, `MODEL_REPLANNED`, `MODEL_COMPLETED`
+
+### Round 9
+
+- External Tool Registry with a typed `EXTERNAL` decision
+- `FETCH_URL` registered retrieval tool; model supplies only `url`
+- Domain allowlist, scheme policy, timeout, size, and redirect re-validation
+- Private/loopback/link-local destinations rejected by default
+- External results become bounded evidence with provenance (`source_type=EXTERNAL`)
+- Failures are recorded as failed invocations, never as successful evidence
+- Report `external_references` is separate from dataset findings
+- Local fallback proposes `FETCH_URL` only for an allowlisted URL found in the goal
+- Events: `EXTERNAL_TOOL_PROPOSED` … `EXTERNAL_TOOL_REJECTED`
+
 ## Optional / future
 
 These are **not** implemented in this round:
@@ -463,7 +638,13 @@ These are **not** implemented in this round:
 - CSV only (no XLSX, PDF, or other formats)
 - Consistency checks are a small explicit rule set
 - Adaptive branches are a defined evidence-driven policy, not an unbounded model-authored workflow
-- When Gemini is configured, it participates in initial capability selection and final interpretation; tool execution stays inside ATLAS
+- When Gemini is configured it proposes typed supervisor decisions; ATLAS still executes tools and actions
+- Default tests use scripted/local decisions and do not call live Gemini
+- Live Gemini supervisor decisions depend on credentials in the environment running the process
+- Working-copy writes are not a transactional filesystem: a crash after a successful write and before persist can leave an unused object; retry uses the last verified version
+- Only dataset remediations inside the working-copy sandbox; no arbitrary external side effects
+- External fetches are limited to registered tools and the configured domain allowlist
+- DNS-rebinding TOCTOU remains (see External tools)
 - Step execution for missions *without* a dataset is still a lifecycle demonstration, not specialist delegation
 - Recovery is on-demand. Completed specialist tasks are not rerun; a tool that died mid-call is retried
 - Delegation is in-process in the mission worker (local asyncio or the Cloud Run worker). There is no separate specialist fleet

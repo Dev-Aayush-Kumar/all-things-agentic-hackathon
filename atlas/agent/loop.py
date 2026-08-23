@@ -428,6 +428,7 @@ class AgentLoop:
             overall_assessment=reasoning.overall_assessment,
             recommended_actions=reasoning.recommended_actions,
             reasoning_source=reasoning.source,
+            evidence_records=list(mission.evidence_records),
         )
         mission.investigation_report.interpretations = list(mission.interpretations)
         mission.investigation_report.evidence_records = list(mission.evidence_records)

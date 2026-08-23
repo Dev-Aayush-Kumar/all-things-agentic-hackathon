@@ -20,20 +20,30 @@ from atlas.domain.models import AgentDescriptor
 DATA_ANALYST_ID = "atlas.data_analyst"
 INVESTIGATOR_ID = "atlas.investigator"
 REPORTER_ID = "atlas.reporter"
+REMEDIATOR_ID = "atlas.remediator"
 SUPERVISOR_ID = "atlas.supervisor"
 
 CAPABILITY_PROFILE = PROFILE_DATASET
 CAPABILITY_INVESTIGATE = "investigate_evidence"
 CAPABILITY_INVESTIGATE_COLUMN = "investigate_column"
 CAPABILITY_SYNTHESIZE = "synthesize_report"
+CAPABILITY_REMOVE_DUPLICATES = "remove_duplicates"
+CAPABILITY_FILL_MISSING = "fill_missing_values"
+CAPABILITY_EXECUTE_REMEDIATION = "execute_remediation"
 
 ANALYST_TOOLS = list(INVESTIGATION_TOOLS)
 INVESTIGATOR_TOOLS = [INSPECT_COLUMN]
 REPORTER_TOOLS: list[str] = []
+REMEDIATOR_TOOLS: list[str] = []
 
 ANALYST_CAPABILITIES = list(INVESTIGATION_TOOLS)
 INVESTIGATOR_CAPABILITIES = [CAPABILITY_INVESTIGATE, CAPABILITY_INVESTIGATE_COLUMN]
 REPORTER_CAPABILITIES = [CAPABILITY_SYNTHESIZE, "prioritize_findings"]
+REMEDIATOR_CAPABILITIES = [
+    CAPABILITY_REMOVE_DUPLICATES,
+    CAPABILITY_FILL_MISSING,
+    CAPABILITY_EXECUTE_REMEDIATION,
+]
 
 
 class UnknownCapabilityError(LookupError):
@@ -78,6 +88,17 @@ def _default_descriptors() -> list[AgentDescriptor]:
             ),
             capabilities=list(REPORTER_CAPABILITIES),
             allowed_tools=list(REPORTER_TOOLS),
+        ),
+        AgentDescriptor(
+            id=REMEDIATOR_ID,
+            name="Remediator",
+            role=AgentRole.REMEDIATOR,
+            description=(
+                "Executes allowlisted dataset remediations against a controlled "
+                "working copy. Cannot run observation tools or arbitrary code."
+            ),
+            capabilities=list(REMEDIATOR_CAPABILITIES),
+            allowed_tools=list(REMEDIATOR_TOOLS),
         ),
         AgentDescriptor(
             id=SUPERVISOR_ID,

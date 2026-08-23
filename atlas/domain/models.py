@@ -7,12 +7,18 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from atlas.domain.enums import (
+    ActionRisk,
+    ActionStatus,
     AgentPhase,
     AgentRole,
     EventType,
+    EvidenceSourceType,
     ExecutionState,
+    ExternalAuthorizationMode,
+    ExternalInvocationStatus,
     FindingCategory,
     MissionStatus,
+    ModelDecisionKind,
     PlannerSource,
     Severity,
     StepStatus,
@@ -122,6 +128,10 @@ class InvestigationReport(BaseModel):
     reasoning_source: PlannerSource
     interpretations: list["AgentInterpretation"] = Field(default_factory=list)
     evidence_records: list["EvidenceRecord"] = Field(default_factory=list)
+    actions_performed: list["ActionSummary"] = Field(default_factory=list)
+    working_copy: "WorkingCopyPublic | None" = None
+    remaining_issues: list[str] = Field(default_factory=list)
+    external_references: list["ExternalReference"] = Field(default_factory=list)
 
 
 class AgentTask(BaseModel):
@@ -237,6 +247,222 @@ class DelegationPlan(BaseModel):
     current_task_ids: list[str] = Field(default_factory=list)
 
 
+class ActionVerification(BaseModel):
+    """Mandatory postcondition check. Success is not implied by a return."""
+
+    passed: bool
+    before: dict[str, Any] = Field(default_factory=dict)
+    after: dict[str, Any] = Field(default_factory=dict)
+    expected: dict[str, Any] = Field(default_factory=dict)
+    actual: dict[str, Any] = Field(default_factory=dict)
+    summary: str = ""
+
+
+class ActionResult(BaseModel):
+    """Structured outcome of a sandbox action."""
+
+    summary: str
+    rows_before: int | None = None
+    rows_after: int | None = None
+    output_version: int | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class ActionRecord(BaseModel):
+    """First-class persisted action. Gemini never writes this as raw dicts."""
+
+    action_id: str = Field(default_factory=lambda: str(uuid4()))
+    mission_id: str
+    task_id: str | None = None
+    agent_id: str
+    action_type: str
+    objective: str
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    status: ActionStatus = ActionStatus.PROPOSED
+    created_at: datetime = Field(default_factory=utc_now)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    result: ActionResult | None = None
+    verification: ActionVerification | None = None
+    error: str | None = None
+    provenance: PlannerSource = PlannerSource.LOCAL_FALLBACK
+    attempt_count: int = 0
+    max_attempts: int = 2
+    idempotency_key: str
+    input_version: int = 0
+    output_version: int | None = None
+
+
+class ActionSummary(BaseModel):
+    """Safe action projection for API and final reports."""
+
+    action_id: str
+    action_type: str
+    objective: str
+    status: ActionStatus
+    summary: str | None = None
+    verification_passed: bool | None = None
+    before: dict[str, Any] = Field(default_factory=dict)
+    after: dict[str, Any] = Field(default_factory=dict)
+    output_version: int | None = None
+
+
+class WorkingCopyVersion(BaseModel):
+    """One verified working-copy snapshot. Never the uploaded source."""
+
+    version: int
+    stored_filename: str
+    parent_version: int | None = None
+    created_by_action_id: str | None = None
+    row_count: int
+    column_count: int
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class WorkingCopyState(BaseModel):
+    """Tracks immutable source vs controlled working versions."""
+
+    source_dataset_id: str
+    source_stored_filename: str
+    source_original_filename: str | None = None
+    current_version: int = 0
+    versions: list[WorkingCopyVersion] = Field(default_factory=list)
+
+    def current_filename(self) -> str:
+        if self.current_version <= 0:
+            return self.source_stored_filename
+        for item in self.versions:
+            if item.version == self.current_version:
+                return item.stored_filename
+        return self.source_stored_filename
+
+    def transformations(self) -> list[str]:
+        return [
+            f"v{item.version}:{item.created_by_action_id or 'copy'}"
+            for item in self.versions
+        ]
+
+
+class WorkingCopyPublic(BaseModel):
+    """Safe working-copy metadata for API clients."""
+
+    source_dataset_id: str
+    current_version: int
+    current_stored_filename: str | None = None
+    transformations: list[str] = Field(default_factory=list)
+
+
+class ProposedTask(BaseModel):
+    """A specialist or observation capability the model wants delegated."""
+
+    capability: str
+    objective: str = ""
+    inputs: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProposedObservation(BaseModel):
+    """A single allowlisted observation tool request."""
+
+    name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProposedActionRequest(BaseModel):
+    """A single allowlisted remediation the model wants ATLAS to consider."""
+
+    type: str
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProposedExternalRequest(BaseModel):
+    """A single registered external capability the model wants ATLAS to consider."""
+
+    capability: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class ModelDecision(BaseModel):
+    """Typed supervisor decision. Malformed payloads are rejected, not guessed."""
+
+    decision: ModelDecisionKind
+    reason: str
+    tasks: list[ProposedTask] = Field(default_factory=list)
+    tool: ProposedObservation | None = None
+    action: ProposedActionRequest | None = None
+    external: ProposedExternalRequest | None = None
+    summary: str | None = None
+
+
+class DecisionRecord(BaseModel):
+    """Persisted reasoning step. Never includes credentials."""
+
+    decision_id: str = Field(default_factory=lambda: str(uuid4()))
+    iteration: int
+    source: PlannerSource
+    decision: ModelDecision | None = None
+    accepted: bool
+    rejection_reason: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    evidence_ids: list[str] = Field(default_factory=list)
+    fingerprint: str = ""
+
+
+class DecisionRecordPublic(BaseModel):
+    """Safe reasoning projection for API clients."""
+
+    decision_id: str
+    iteration: int
+    source: PlannerSource
+    kind: ModelDecisionKind | None = None
+    reason: str | None = None
+    accepted: bool
+    rejection_reason: str | None = None
+    created_at: datetime
+
+
+class ReasoningBudget(BaseModel):
+    """Remaining loop budget shown to the decision-maker."""
+
+    reasoning_iteration: int
+    max_reasoning_iterations: int
+    model_calls: int
+    max_model_calls: int
+    tool_calls: int
+    max_tool_calls: int
+    specialist_tasks: int
+    max_specialist_tasks: int
+    actions_completed: int
+    max_actions: int
+    repeated_identical: int
+    max_repeated_identical: int
+    external_invocations: int = 0
+    max_external_invocations: int = 4
+
+
+class CapabilityDescription(BaseModel):
+    """Machine-readable allowlisted capability. No implementation internals."""
+
+    name: str
+    kind: str
+    purpose: str
+    allowed_inputs: list[str] = Field(default_factory=list)
+    required_inputs: list[str] = Field(default_factory=list)
+    restrictions: list[str] = Field(default_factory=list)
+    expected_output: str = ""
+
+
+class ActionDescriptor(BaseModel):
+    """Allowlisted action contract."""
+
+    action_type: str
+    description: str
+    parameters: list[str] = Field(default_factory=list)
+    required_parameters: list[str] = Field(default_factory=list)
+    output_fields: list[str] = Field(default_factory=list)
+    risk: ActionRisk = ActionRisk.LOW
+    allowed_agents: list[str] = Field(default_factory=list)
+
+
 class ToolInvocation(BaseModel):
     """A recorded tool call for mission observability."""
 
@@ -257,9 +483,54 @@ class EvidenceRecord(BaseModel):
     evidence_id: str = Field(default_factory=lambda: str(uuid4()))
     tool_name: str
     task_id: str | None = None
+    source_type: EvidenceSourceType = EvidenceSourceType.DATASET
+    source_url: str | None = None
+    execution_status: str | None = None
     observed_facts: dict[str, Any] = Field(default_factory=dict)
     finding_ids: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
+
+
+class ExternalReference(BaseModel):
+    """Bounded external retrieval shown on the report. Not a dataset measurement."""
+
+    tool_name: str
+    source_url: str
+    title: str | None = None
+    excerpt: str
+    status_code: int | None = None
+    retrieved_at: datetime
+    evidence_id: str
+
+
+class ExternalInvocation(BaseModel):
+    """Inspectable external-tool attempt. Failures never become successful evidence."""
+
+    invocation_id: str = Field(default_factory=lambda: str(uuid4()))
+    tool_name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    status: ExternalInvocationStatus = ExternalInvocationStatus.PROPOSED
+    source_url: str | None = None
+    final_url: str | None = None
+    authorization_mode: ExternalAuthorizationMode = ExternalAuthorizationMode.AUTOMATIC
+    evidence_id: str | None = None
+    error: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    completed_at: datetime | None = None
+
+
+class ExternalInvocationPublic(BaseModel):
+    """Safe external-invocation projection. No headers, cookies, or secrets."""
+
+    invocation_id: str
+    tool_name: str
+    status: ExternalInvocationStatus
+    source_url: str | None = None
+    final_url: str | None = None
+    evidence_id: str | None = None
+    error: str | None = None
+    created_at: datetime
+    completed_at: datetime | None = None
 
 
 class AgentInterpretation(BaseModel):
@@ -386,6 +657,12 @@ class Mission(BaseModel):
     tool_invocations: list[ToolInvocation] = Field(default_factory=list)
     evidence_records: list[EvidenceRecord] = Field(default_factory=list)
     interpretations: list[AgentInterpretation] = Field(default_factory=list)
+    actions: list[ActionRecord] = Field(default_factory=list)
+    working_copy: WorkingCopyState | None = None
+    reasoning_trace: list[DecisionRecord] = Field(default_factory=list)
+    reasoning_iteration: int = 0
+    model_call_count: int = 0
+    external_invocations: list[ExternalInvocation] = Field(default_factory=list)
     events: list[MissionEvent] = Field(default_factory=list)
     execution: MissionExecution = Field(default_factory=MissionExecution)
     created_at: datetime = Field(default_factory=utc_now)
@@ -432,6 +709,10 @@ class MissionDetailResponse(BaseModel):
     tool_invocations: list[ToolInvocation] = Field(default_factory=list)
     evidence_records: list[EvidenceRecord] = Field(default_factory=list)
     interpretations: list[AgentInterpretation] = Field(default_factory=list)
+    actions: list[ActionSummary] = Field(default_factory=list)
+    working_copy: WorkingCopyPublic | None = None
+    reasoning_trace: list[DecisionRecordPublic] = Field(default_factory=list)
+    external_invocations: list[ExternalInvocationPublic] = Field(default_factory=list)
     events: list[MissionEvent]
     execution: MissionExecutionPublic | None = None
     created_at: datetime
@@ -457,6 +738,10 @@ class MissionDetailResponse(BaseModel):
             tool_invocations=mission.tool_invocations,
             evidence_records=mission.evidence_records,
             interpretations=mission.interpretations,
+            actions=[public_action(item) for item in mission.actions],
+            working_copy=public_working_copy(mission.working_copy),
+            reasoning_trace=[public_decision(item) for item in mission.reasoning_trace],
+            external_invocations=[public_external_invocation(item) for item in mission.external_invocations],
             events=mission.events,
             execution=MissionExecutionPublic.from_execution(mission.execution),
             created_at=mission.created_at,
@@ -464,6 +749,65 @@ class MissionDetailResponse(BaseModel):
             completed_at=mission.completed_at,
             error=mission.error,
         )
+
+
+def public_action(record: ActionRecord) -> ActionSummary:
+    """Safe action projection. Never includes secrets or raw internals."""
+    verification = record.verification
+    return ActionSummary(
+        action_id=record.action_id,
+        action_type=record.action_type,
+        objective=record.objective,
+        status=record.status,
+        summary=record.result.summary if record.result else record.error,
+        verification_passed=verification.passed if verification else None,
+        before=verification.before if verification else {},
+        after=verification.after if verification else {},
+        output_version=record.output_version,
+    )
+
+
+def public_decision(record: DecisionRecord) -> DecisionRecordPublic:
+    """Safe reasoning projection. Never includes secrets or raw internals."""
+    return DecisionRecordPublic(
+        decision_id=record.decision_id,
+        iteration=record.iteration,
+        source=record.source,
+        kind=record.decision.decision if record.decision is not None else None,
+        reason=record.decision.reason if record.decision is not None else None,
+        accepted=record.accepted,
+        rejection_reason=record.rejection_reason,
+        created_at=record.created_at,
+    )
+
+
+def public_external_invocation(record: ExternalInvocation) -> ExternalInvocationPublic:
+    """Safe external-tool projection. Never includes headers or credentials."""
+    return ExternalInvocationPublic(
+        invocation_id=record.invocation_id,
+        tool_name=record.tool_name,
+        status=record.status,
+        source_url=record.source_url,
+        final_url=record.final_url,
+        evidence_id=record.evidence_id,
+        error=record.error,
+        created_at=record.created_at,
+        completed_at=record.completed_at,
+    )
+
+
+def public_working_copy(state: WorkingCopyState | None) -> WorkingCopyPublic | None:
+    """Safe working-copy metadata for API clients."""
+    if state is None:
+        return None
+    return WorkingCopyPublic(
+        source_dataset_id=state.source_dataset_id,
+        current_version=state.current_version,
+        current_stored_filename=(
+            state.current_filename() if state.current_version > 0 else None
+        ),
+        transformations=state.transformations(),
+    )
 
 
 class HealthResponse(BaseModel):
@@ -488,5 +832,6 @@ class HealthResponse(BaseModel):
 DelegationPlan.model_rebuild()
 SpecialistTask.model_rebuild()
 InvestigationReport.model_rebuild()
+DecisionRecord.model_rebuild()
 Mission.model_rebuild()
 MissionDetailResponse.model_rebuild()

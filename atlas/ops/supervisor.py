@@ -9,23 +9,45 @@ import asyncio
 import logging
 import time
 
+from atlas.agent.local_decider import LocalDecisionMaker
 from atlas.agent.policy import understand_goal
 from atlas.agent.reasoner_base import InvestigationReasoner
 from atlas.agent.tools import INVESTIGATION_TOOLS, ToolContext
 from atlas.config.settings import Settings
-from atlas.domain.enums import AgentPhase, EventType, PlannerSource, StepStatus
-from atlas.domain.models import Mission, MissionEvent
+from atlas.domain.enums import (
+    ActionStatus,
+    AgentPhase,
+    EventType,
+    ModelDecisionKind,
+    PlannerSource,
+    StepStatus,
+)
+from atlas.domain.exceptions import ModelDecisionError
+from atlas.domain.models import (
+    ActionRecord,
+    AgentPlan,
+    DecisionRecord,
+    DelegationPlan,
+    Mission,
+    MissionEvent,
+    WorkingCopyState,
+)
+from atlas.ops.actions.registry import (
+    ACTION_CAPABILITIES,
+    make_idempotency_key,
+)
 from atlas.ops.delegation import LocalDelegationManager
+from atlas.ops.decisions import validate_decision
 from atlas.ops.planning import (
     append_follow_up,
     build_initial_delegation,
-    has_open_work,
     initial_analyst_tools,
-    observe_follow_ups,
     ready_tasks,
     synthesis_follow_up,
     task_exists,
 )
+from atlas.ops.reasoning_context import build_reasoning_context
+from atlas.storage.base import DatasetStorage
 from atlas.ops.registry import CAPABILITY_SYNTHESIZE, AgentRegistry, default_registry
 from atlas.ops.specialists import build_specialists
 from atlas.ops.workspace import MissionWorkspace, PersistFn
@@ -50,6 +72,9 @@ class Supervisor:
         registry: AgentRegistry | None = None,
         step_delay_seconds: float = 0.0,
         specialists: dict | None = None,
+        dataset_storage: DatasetStorage | None = None,
+        decision_maker=None,
+        external_executor=None,
     ) -> None:
         self._reasoner = reasoner
         self._settings = settings
@@ -59,6 +84,10 @@ class Supervisor:
         self._step_delay_seconds = step_delay_seconds
         self._specialists = specialists or build_specialists(self._registry)
         self._delegation = LocalDelegationManager(self._specialists)
+        self._dataset_storage = dataset_storage
+        self._decision_maker = decision_maker or LocalDecisionMaker()
+        self._local_fallback_decider = LocalDecisionMaker()
+        self._external_executor = external_executor
 
     async def run(
         self,
@@ -77,8 +106,10 @@ class Supervisor:
             registry=self._registry,
             plan_source=self._plan_source,
             step_delay_seconds=self._step_delay_seconds,
+            dataset_storage=self._dataset_storage,
         )
         self._restore_inspected(workspace)
+        self._ensure_working_copy(workspace)
 
         mission.current_phase = AgentPhase.UNDERSTANDING
         understanding = understand_goal(mission.goal)
@@ -95,44 +126,47 @@ class Supervisor:
         resuming = self._prepare_plan(mission)
         if not resuming:
             mission.current_phase = AgentPhase.PLANNING
-            tools = initial_analyst_tools(mission.goal, self._selected_tools)
-            mission.delegation_plan = build_initial_delegation(
-                mission,
-                tools=tools,
-                source=self._plan_source,
-                registry=self._registry,
-                max_attempts=self._settings.specialist_task_max_attempts,
-            )
-            if mission.agent_plan is not None:
-                mission.agent_plan.max_iterations = self._settings.agent_max_iterations
-            _add_event(
-                mission,
-                EventType.DELEGATION_PLAN_CREATED,
-                "Delegation plan created",
-                {
-                    "task_count": len(mission.delegation_plan.tasks),
-                    "source": self._plan_source.value,
-                    "agent_ids": sorted(
-                        {task.agent_id for task in mission.delegation_plan.tasks}
-                    ),
-                },
-            )
-            _add_event(
-                mission,
-                EventType.AGENT_PLAN_CREATED,
-                "Agent plan created",
-                {
-                    "selected_tools": tools,
-                    "task_count": len(tools),
-                    "source": self._plan_source.value,
-                },
-            )
-            _add_event(
-                mission,
-                EventType.AGENT_DECISION,
-                "Initial capabilities selected from the mission goal",
-                {"selected_tools": tools},
-            )
+            if self._decision_maker.drives_initial_plan:
+                self._init_empty_plan(mission)
+            else:
+                tools = initial_analyst_tools(mission.goal, self._selected_tools)
+                mission.delegation_plan = build_initial_delegation(
+                    mission,
+                    tools=tools,
+                    source=self._plan_source,
+                    registry=self._registry,
+                    max_attempts=self._settings.specialist_task_max_attempts,
+                )
+                if mission.agent_plan is not None:
+                    mission.agent_plan.max_iterations = self._settings.agent_max_iterations
+                _add_event(
+                    mission,
+                    EventType.DELEGATION_PLAN_CREATED,
+                    "Delegation plan created",
+                    {
+                        "task_count": len(mission.delegation_plan.tasks),
+                        "source": self._plan_source.value,
+                        "agent_ids": sorted(
+                            {task.agent_id for task in mission.delegation_plan.tasks}
+                        ),
+                    },
+                )
+                _add_event(
+                    mission,
+                    EventType.AGENT_PLAN_CREATED,
+                    "Agent plan created",
+                    {
+                        "selected_tools": tools,
+                        "task_count": len(tools),
+                        "source": self._plan_source.value,
+                    },
+                )
+                _add_event(
+                    mission,
+                    EventType.AGENT_DECISION,
+                    "Initial capabilities selected from the mission goal",
+                    {"selected_tools": tools},
+                )
             await persist()
         else:
             logger.info("Resuming mission %s from persisted specialist tasks", mission.mission_id)
@@ -154,10 +188,16 @@ class Supervisor:
             ):
                 self._hit_limit(mission, "Agent tool-call limit reached")
                 break
+            if mission.model_call_count >= self._settings.max_model_calls and not ready_tasks(plan):
+                self._hit_limit(mission, "Model-call limit reached")
+                break
 
             ready = ready_tasks(plan)
             if ready:
-                mission.current_phase = AgentPhase.DELEGATING
+                if any(task.capability in ACTION_CAPABILITIES for task in ready):
+                    mission.current_phase = AgentPhase.ACTING
+                else:
+                    mission.current_phase = AgentPhase.DELEGATING
                 plan.current_task_ids = [task.task_id for task in ready]
                 await persist()
                 await self._delegation.execute_ready(ready, workspace)
@@ -179,54 +219,10 @@ class Supervisor:
                 await persist()
                 continue
 
-            follow_ups = observe_follow_ups(workspace)
-            added = self._apply_follow_ups(mission, follow_ups, adaptive=True)
-            if added:
-                mission.current_phase = AgentPhase.ADAPTING
-                plan.replan_count += 1
-                _add_event(
-                    mission,
-                    EventType.REPLAN_TRIGGERED,
-                    "Supervisor replanned after observing evidence",
-                    {
-                        "added_task_ids": [task.task_id for task in added],
-                        "replan_count": plan.replan_count,
-                    },
-                )
-                _add_event(
-                    mission,
-                    EventType.AGENT_DECISION,
-                    "Additional specialist work is justified by observed evidence",
-                    {
-                        "capabilities": [task.capability for task in added],
-                    },
-                )
+            should_continue = await self._consult_decision_maker(workspace)
+            if should_continue:
                 await persist()
                 continue
-
-            if (
-                mission.dataset_profile is not None
-                and not has_open_work(plan)
-                and not task_exists(plan, CAPABILITY_SYNTHESIZE)
-            ):
-                reporter = append_follow_up(
-                    mission,
-                    synthesis_follow_up(),
-                    registry=self._registry,
-                    max_attempts=self._settings.specialist_task_max_attempts,
-                    depends_on=_completed_ids(plan),
-                )
-                if reporter is not None:
-                    mission.current_phase = AgentPhase.SYNTHESIZING
-                    _add_event(
-                        mission,
-                        EventType.SYNTHESIS_STARTED,
-                        "Synthesis started",
-                        {"task_id": reporter.task_id},
-                    )
-                    await persist()
-                    continue
-
             break
 
         await self._ensure_report(workspace)
@@ -294,6 +290,344 @@ class Supervisor:
         mission.current_task = None
         await persist()
 
+    def _init_empty_plan(self, mission: Mission) -> None:
+        objective = understand_goal(mission.goal)
+        mission.delegation_plan = DelegationPlan(
+            objective=objective,
+            source=self._plan_source,
+            tasks=[],
+        )
+        mission.agent_plan = AgentPlan(
+            objective=objective,
+            source=self._plan_source,
+            selected_tools=[],
+            tasks=[],
+            status="IN_PROGRESS",
+            max_iterations=self._settings.agent_max_iterations,
+        )
+        mission.execution_plan = mission.agent_plan.to_execution_plan()
+        mission.current_objective = objective
+        _add_event(
+            mission,
+            EventType.DELEGATION_PLAN_CREATED,
+            "Delegation plan created",
+            {
+                "task_count": 0,
+                "source": self._plan_source.value,
+                "agent_ids": [],
+                "model_driven": True,
+            },
+        )
+
+    async def _consult_decision_maker(self, workspace: MissionWorkspace) -> bool:
+        mission = workspace.mission
+        plan = mission.delegation_plan
+        assert plan is not None
+        mission.current_phase = AgentPhase.REASONING
+        mission.reasoning_iteration += 1
+        context = build_reasoning_context(workspace)
+        context["_workspace"] = workspace
+        _add_event(
+            mission,
+            EventType.MODEL_REASONING_STARTED,
+            "Supervisor requested the next typed decision",
+            {
+                "iteration": mission.reasoning_iteration,
+                "source": self._decision_maker.source.value,
+            },
+        )
+        source = self._decision_maker.source
+        decision = None
+        try:
+            if source == PlannerSource.GEMINI_ADK:
+                mission.model_call_count += 1
+            decision = await self._decision_maker.decide(context)
+        except Exception as exc:
+            logger.exception("Decision-maker failed mission=%s", mission.mission_id)
+            self._store_decision(
+                mission,
+                source=source,
+                decision=None,
+                accepted=False,
+                rejection_reason=str(exc),
+                fingerprint="",
+            )
+            _add_event(
+                mission,
+                EventType.MODEL_DECISION_REJECTED,
+                "Model decision failed",
+                {"error": str(exc), "source": source.value},
+            )
+            if source == PlannerSource.GEMINI_ADK:
+                decision = self._local_fallback_decider.decide_from_workspace(workspace)
+                source = PlannerSource.LOCAL_FALLBACK
+            else:
+                return False
+        assert decision is not None
+        _add_event(
+            mission,
+            EventType.MODEL_DECISION_RECEIVED,
+            f"Decision received: {decision.decision.value}",
+            {
+                "decision": decision.decision.value,
+                "reason": decision.reason,
+                "source": source.value,
+            },
+        )
+        try:
+            validated = validate_decision(decision, workspace, registry=self._registry)
+        except ModelDecisionError as exc:
+            fingerprint = ""
+            try:
+                from atlas.ops.decisions import decision_fingerprint
+
+                fingerprint = decision_fingerprint(decision)
+            except Exception:
+                fingerprint = ""
+            self._store_decision(
+                mission,
+                source=source,
+                decision=decision,
+                accepted=False,
+                rejection_reason=str(exc),
+                fingerprint=fingerprint,
+            )
+            _add_event(
+                mission,
+                EventType.MODEL_DECISION_REJECTED,
+                "Model decision rejected",
+                {"error": str(exc), "source": source.value},
+            )
+            if self._repeated_limit_reached(mission, fingerprint):
+                self._hit_limit(mission, "Repeated identical decisions are bounded")
+                return False
+            return True
+
+        self._store_decision(
+            mission,
+            source=source,
+            decision=validated.decision,
+            accepted=True,
+            rejection_reason=None,
+            fingerprint=validated.fingerprint,
+        )
+        _add_event(
+            mission,
+            EventType.MODEL_DECISION_VALIDATED,
+            f"Decision validated: {validated.decision.decision.value}",
+            {
+                "decision": validated.decision.decision.value,
+                "source": source.value,
+            },
+        )
+        if self._repeated_limit_reached(mission, validated.fingerprint):
+            self._hit_limit(mission, "Repeated identical decisions are bounded")
+            return False
+
+        if validated.decision.decision == ModelDecisionKind.COMPLETE:
+            _add_event(
+                mission,
+                EventType.MODEL_COMPLETED,
+                "Model completed the mission",
+                {"reason": validated.decision.reason, "source": source.value},
+            )
+            return False
+
+        if validated.decision.decision == ModelDecisionKind.EXTERNAL:
+            await self._execute_external_decision(workspace, validated.decision, source)
+            return True
+
+        added = self._apply_follow_ups(
+            mission,
+            validated.follow_ups,
+            adaptive=validated.decision.decision != ModelDecisionKind.ACTION,
+            proposal_source=source,
+        )
+        if not added:
+            return True
+        plan.replan_count += 1
+        if validated.decision.decision == ModelDecisionKind.ACTION:
+            mission.current_phase = AgentPhase.ACTING
+        elif validated.decision.decision == ModelDecisionKind.OBSERVE:
+            mission.current_phase = AgentPhase.OBSERVING
+        elif any(task.capability == CAPABILITY_SYNTHESIZE for task in added):
+            mission.current_phase = AgentPhase.SYNTHESIZING
+            _add_event(
+                mission,
+                EventType.SYNTHESIS_STARTED,
+                "Synthesis started",
+                {"task_id": added[0].task_id},
+            )
+        else:
+            mission.current_phase = AgentPhase.ADAPTING
+        _add_event(
+            mission,
+            EventType.REPLAN_TRIGGERED,
+            "Supervisor replanned after a validated decision",
+            {
+                "added_task_ids": [task.task_id for task in added],
+                "replan_count": plan.replan_count,
+            },
+        )
+        _add_event(
+            mission,
+            EventType.MODEL_REPLANNED,
+            "Model decision added work",
+            {
+                "capabilities": [task.capability for task in added],
+                "source": source.value,
+            },
+        )
+        if any(task.inputs.get("reobserve") for task in added):
+            _add_event(
+                mission,
+                EventType.REPLAN_AFTER_ACTION,
+                "Supervisor replanned after a verified action",
+                {
+                    "added_task_ids": [task.task_id for task in added],
+                    "capabilities": [task.capability for task in added],
+                },
+            )
+        _add_event(
+            mission,
+            EventType.AGENT_DECISION,
+            validated.decision.reason,
+            {"capabilities": [task.capability for task in added], "source": source.value},
+        )
+        if validated.decision.decision == ModelDecisionKind.OBSERVE:
+            _add_event(
+                mission,
+                EventType.OBSERVATION_REQUESTED,
+                "Observation requested",
+                {
+                    "tool": validated.decision.tool.name if validated.decision.tool else None,
+                    "source": source.value,
+                },
+            )
+        for task in added:
+            _add_event(
+                mission,
+                EventType.SPECIALIST_DELEGATED,
+                f"Specialist work accepted: {task.capability}",
+                {
+                    "task_id": task.task_id,
+                    "agent_id": task.agent_id,
+                    "capability": task.capability,
+                    "source": source.value,
+                },
+            )
+        return True
+
+    async def _execute_external_decision(self, workspace, decision, source) -> None:
+        from atlas.ops.external.executor import ExternalToolExecutor
+
+        mission = workspace.mission
+        request = decision.external
+        assert request is not None
+        _add_event(
+            mission,
+            EventType.EXTERNAL_TOOL_PROPOSED,
+            f"External tool proposed: {request.capability}",
+            {
+                "capability": request.capability,
+                "source": source.value,
+                "reason": decision.reason,
+            },
+        )
+        executor = self._external_executor or ExternalToolExecutor()
+        _add_event(
+            mission,
+            EventType.EXTERNAL_TOOL_STARTED,
+            f"External tool started: {request.capability}",
+            {"capability": request.capability, "source": source.value},
+        )
+        invocation = await executor.invoke(
+            workspace,
+            capability=request.capability,
+            arguments=dict(request.arguments),
+            reason=decision.reason,
+            source=source,
+        )
+        if mission.agent_plan is not None:
+            mission.agent_plan.tool_call_count += 1
+        if invocation.status.value == "AUTHORIZED" or invocation.status.value == "SUCCEEDED":
+            _add_event(
+                mission,
+                EventType.EXTERNAL_TOOL_AUTHORIZED,
+                f"External tool authorized: {request.capability}",
+                {"capability": request.capability, "invocation_id": invocation.invocation_id},
+            )
+        if invocation.status.value == "SUCCEEDED":
+            _add_event(
+                mission,
+                EventType.EXTERNAL_TOOL_COMPLETED,
+                f"External tool completed: {request.capability}",
+                {
+                    "capability": request.capability,
+                    "evidence_id": invocation.evidence_id,
+                    "source_url": invocation.source_url,
+                },
+            )
+            _add_event(
+                mission,
+                EventType.EVIDENCE_RECEIVED,
+                "External evidence recorded",
+                {
+                    "evidence_id": invocation.evidence_id,
+                    "source_type": "EXTERNAL",
+                    "tool_name": request.capability,
+                },
+            )
+        elif invocation.status.value == "REJECTED":
+            _add_event(
+                mission,
+                EventType.EXTERNAL_TOOL_REJECTED,
+                "External tool rejected",
+                {"capability": request.capability, "error": invocation.error},
+            )
+        else:
+            _add_event(
+                mission,
+                EventType.EXTERNAL_TOOL_FAILED,
+                "External tool failed",
+                {"capability": request.capability, "error": invocation.error},
+            )
+        await workspace.persist()
+
+    def _store_decision(
+        self,
+        mission: Mission,
+        *,
+        source: PlannerSource,
+        decision,
+        accepted: bool,
+        rejection_reason: str | None,
+        fingerprint: str,
+    ) -> None:
+        evidence_ids = [item.evidence_id for item in mission.evidence_records[-8:]]
+        mission.reasoning_trace.append(
+            DecisionRecord(
+                iteration=mission.reasoning_iteration,
+                source=source,
+                decision=decision,
+                accepted=accepted,
+                rejection_reason=rejection_reason,
+                evidence_ids=evidence_ids,
+                fingerprint=fingerprint,
+            )
+        )
+
+    def _repeated_limit_reached(self, mission: Mission, fingerprint: str) -> bool:
+        if not fingerprint:
+            return False
+        streak = 0
+        for record in reversed(mission.reasoning_trace):
+            if record.fingerprint == fingerprint:
+                streak += 1
+            else:
+                break
+        return streak >= self._settings.max_repeated_decisions
+
     def _prepare_plan(self, mission: Mission) -> bool:
         plan = mission.delegation_plan
         if plan is None or not plan.tasks:
@@ -307,9 +641,21 @@ class Supervisor:
             for task in mission.agent_plan.tasks:
                 if task.status == StepStatus.IN_PROGRESS:
                     task.status = StepStatus.PENDING
+        for action in mission.actions:
+            if action.status in {ActionStatus.RUNNING, ActionStatus.AUTHORIZED}:
+                action.status = ActionStatus.PROPOSED
+                action.started_at = None
+                action.error = "Interrupted; will retry from last verified working copy"
         return any(task.status == StepStatus.COMPLETED for task in plan.tasks)
 
-    def _apply_follow_ups(self, mission: Mission, follow_ups, *, adaptive: bool) -> list:
+    def _apply_follow_ups(
+        self,
+        mission: Mission,
+        follow_ups,
+        *,
+        adaptive: bool,
+        proposal_source: PlannerSource | None = None,
+    ) -> list:
         plan = mission.delegation_plan
         assert plan is not None
         added = []
@@ -325,6 +671,13 @@ class Supervisor:
             if task is None:
                 continue
             added.append(task)
+            if follow_up.capability in ACTION_CAPABILITIES:
+                self._record_proposed_action(
+                    mission,
+                    task,
+                    follow_up,
+                    source=proposal_source or PlannerSource.LOCAL_FALLBACK,
+                )
             if follow_up.capability in INVESTIGATION_TOOLS:
                 _add_event(
                     mission,
@@ -414,6 +767,82 @@ class Supervisor:
                 {"task_id": reporter.task_id},
             )
             await self._delegation.execute_ready([reporter], workspace)
+
+    def _record_proposed_action(
+        self,
+        mission: Mission,
+        task,
+        follow_up,
+        *,
+        source: PlannerSource = PlannerSource.LOCAL_FALLBACK,
+    ) -> None:
+        action_type = follow_up.arguments.get("action_type")
+        if not isinstance(action_type, str):
+            return
+        parameters = follow_up.arguments.get("parameters")
+        if not isinstance(parameters, dict):
+            parameters = {}
+        input_version = (
+            mission.working_copy.current_version if mission.working_copy is not None else 0
+        )
+        key = make_idempotency_key(
+            mission_id=mission.mission_id,
+            action_type=action_type,
+            parameters=parameters,
+            input_version=input_version,
+        )
+        if any(item.idempotency_key == key for item in mission.actions):
+            _add_event(
+                mission,
+                EventType.ACTION_PROPOSED,
+                f"Action proposed: {action_type}",
+                {
+                    "action_type": action_type,
+                    "task_id": task.task_id,
+                    "source": source.value,
+                    "reason": follow_up.reason,
+                },
+            )
+            return
+        mission.actions.append(
+            ActionRecord(
+                mission_id=mission.mission_id,
+                task_id=task.task_id,
+                agent_id=task.agent_id,
+                action_type=action_type,
+                objective=follow_up.objective,
+                parameters=parameters,
+                status=ActionStatus.PROPOSED,
+                provenance=source,
+                max_attempts=self._settings.action_max_attempts,
+                idempotency_key=key,
+                input_version=input_version,
+            )
+        )
+        _add_event(
+            mission,
+            EventType.ACTION_PROPOSED,
+            f"Action proposed: {action_type}",
+            {
+                "action_type": action_type,
+                "task_id": task.task_id,
+                "source": source.value,
+                "reason": follow_up.reason,
+            },
+        )
+
+    @staticmethod
+    def _ensure_working_copy(workspace: MissionWorkspace) -> None:
+        mission = workspace.mission
+        if mission.working_copy is not None:
+            return
+        if not workspace.tool_context.dataset_id:
+            return
+        mission.working_copy = WorkingCopyState(
+            source_dataset_id=workspace.tool_context.dataset_id,
+            source_stored_filename="",
+            source_original_filename=workspace.tool_context.original_filename,
+        )
 
     @staticmethod
     def _restore_inspected(workspace: MissionWorkspace) -> None:

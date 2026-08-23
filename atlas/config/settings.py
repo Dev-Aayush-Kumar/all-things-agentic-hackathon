@@ -128,13 +128,40 @@ class Settings(BaseSettings):
     )
 
     # Agent loop safety limits
-    agent_max_iterations: int = Field(default=12, alias="ATLAS_AGENT_MAX_ITERATIONS")
-    agent_max_tool_calls: int = Field(default=16, alias="ATLAS_AGENT_MAX_TOOL_CALLS")
+    agent_max_iterations: int = Field(default=20, alias="ATLAS_AGENT_MAX_ITERATIONS")
+    agent_max_tool_calls: int = Field(default=24, alias="ATLAS_AGENT_MAX_TOOL_CALLS")
     agent_max_runtime_seconds: float = Field(
         default=120.0, alias="ATLAS_AGENT_MAX_RUNTIME_SECONDS"
     )
     specialist_task_max_attempts: int = Field(
         default=2, alias="ATLAS_TASK_MAX_ATTEMPTS"
+    )
+    max_mission_actions: int = Field(default=4, alias="ATLAS_MAX_ACTIONS")
+    action_max_attempts: int = Field(default=2, alias="ATLAS_ACTION_MAX_ATTEMPTS")
+    max_model_calls: int = Field(default=16, alias="ATLAS_MAX_MODEL_CALLS")
+    max_specialist_tasks: int = Field(default=24, alias="ATLAS_MAX_SPECIALIST_TASKS")
+    max_repeated_decisions: int = Field(default=2, alias="ATLAS_MAX_REPEATED_DECISIONS")
+    max_external_invocations: int = Field(
+        default=4, alias="ATLAS_MAX_EXTERNAL_INVOCATIONS"
+    )
+    external_tools_enabled: bool = Field(
+        default=True, alias="ATLAS_EXTERNAL_TOOLS_ENABLED"
+    )
+    fetch_url_enabled: bool = Field(default=True, alias="ATLAS_FETCH_URL_ENABLED")
+    fetch_allowed_domains: str = Field(
+        default="", alias="ATLAS_FETCH_ALLOWED_DOMAINS"
+    )
+    fetch_allowed_schemes: str = Field(
+        default="https,http", alias="ATLAS_FETCH_ALLOWED_SCHEMES"
+    )
+    fetch_timeout_seconds: float = Field(
+        default=5.0, alias="ATLAS_FETCH_TIMEOUT_SECONDS"
+    )
+    fetch_max_bytes: int = Field(default=65536, alias="ATLAS_FETCH_MAX_BYTES")
+    fetch_max_redirects: int = Field(default=3, alias="ATLAS_FETCH_MAX_REDIRECTS")
+    fetch_excerpt_chars: int = Field(default=800, alias="ATLAS_FETCH_EXCERPT_CHARS")
+    fetch_allow_loopback: bool = Field(
+        default=False, alias="ATLAS_FETCH_ALLOW_LOOPBACK"
     )
 
     # Durable execution
@@ -251,6 +278,22 @@ class Settings(BaseSettings):
     def gcs_configured(self) -> bool:
         return bool(self.gcs_bucket)
 
+    @property
+    def fetch_allowed_domain_list(self) -> list[str]:
+        return [
+            item.strip().lower().rstrip(".")
+            for item in self.fetch_allowed_domains.split(",")
+            if item.strip()
+        ]
+
+    @property
+    def fetch_allowed_scheme_list(self) -> list[str]:
+        return [
+            item.strip().lower()
+            for item in self.fetch_allowed_schemes.split(",")
+            if item.strip()
+        ]
+
     def public_diagnostics(self) -> dict[str, str | bool]:
         """Runtime diagnostics safe to log or return from health endpoints."""
         return {
@@ -265,6 +308,8 @@ class Settings(BaseSettings):
             "storage_backend": self.resolved_storage.value,
             "dispatcher_backend": self.resolved_dispatcher.value,
             "adk_configured": self.adk_configured,
+            "external_tools_enabled": self.external_tools_enabled,
+            "fetch_url_enabled": self.fetch_url_enabled,
         }
 
 

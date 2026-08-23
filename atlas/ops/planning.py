@@ -14,6 +14,7 @@ from atlas.domain.models import (
     SpecialistTask,
 )
 from atlas.investigation.missing import MATERIAL_MISSING_PERCENT
+from atlas.ops.actions.policy import propose_action_follow_ups
 from atlas.ops.registry import (
     CAPABILITY_INVESTIGATE,
     CAPABILITY_INVESTIGATE_COLUMN,
@@ -142,6 +143,11 @@ def task_exists(
         if task.capability == capability and comparable == wanted:
             return True
     return False
+
+
+def action_follow_ups(workspace: MissionWorkspace) -> list[SpecialistFollowUp]:
+    """Supervisor-owned action proposals. Gemini never executes these."""
+    return propose_action_follow_ups(workspace)
 
 
 def observe_follow_ups(workspace: MissionWorkspace) -> list[SpecialistFollowUp]:

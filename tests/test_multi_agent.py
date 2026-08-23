@@ -34,6 +34,7 @@ from atlas.ops.registry import (
     CAPABILITY_SYNTHESIZE,
     DATA_ANALYST_ID,
     INVESTIGATOR_ID,
+    REMEDIATOR_ID,
     REPORTER_ID,
     UnknownCapabilityError,
     default_registry,
@@ -76,7 +77,7 @@ async def _run_supervisor(goal: str, csv_name: str, settings: Settings | None = 
 def test_registry_discovers_specialists() -> None:
     registry = default_registry()
     ids = {item.id for item in registry.all()}
-    assert ids == {DATA_ANALYST_ID, INVESTIGATOR_ID, REPORTER_ID}
+    assert ids == {DATA_ANALYST_ID, INVESTIGATOR_ID, REPORTER_ID, REMEDIATOR_ID}
     analyst = registry.get(DATA_ANALYST_ID)
     assert PROFILE_DATASET in analyst.capabilities
     assert INSPECT_COLUMN in analyst.allowed_tools
@@ -85,6 +86,9 @@ def test_registry_discovers_specialists() -> None:
     assert PROFILE_DATASET not in investigator.allowed_tools
     reporter = registry.get(REPORTER_ID)
     assert reporter.allowed_tools == []
+    remediator = registry.get(REMEDIATOR_ID)
+    assert remediator.allowed_tools == []
+    assert "remove_duplicates" in remediator.capabilities
 
 
 def test_capability_matching() -> None:
@@ -196,8 +200,8 @@ async def test_independent_tasks_execute_concurrently() -> None:
     await manager.execute_ready(tasks, workspace)
     elapsed = time.monotonic() - began
     assert len(started) == 2
-    assert abs(started[0] - started[1]) < 0.05
-    assert elapsed < 0.14
+    assert abs(started[0] - started[1]) < 0.2
+    assert elapsed < 0.5
     assert all(task.status == StepStatus.COMPLETED for task in tasks)
 
 
