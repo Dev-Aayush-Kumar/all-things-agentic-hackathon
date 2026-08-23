@@ -4,7 +4,7 @@
 
 ATLAS is an autonomous operations agent built for the Google All Things Agentic Hackathon 2026. Instead of requiring step-by-step instructions, ATLAS accepts a high-level goal and autonomously plans, executes, and reports on the work.
 
-> **Round 3 focus:** Real agentic orchestration. ATLAS interprets the mission, produces a structured plan, selects constrained investigation tools, observes their evidence, adapts when the evidence warrants more work, and then reasons over measured facts. It does not blindly run every analysis.
+> **Round 4 focus:** Durable asynchronous missions. The API submits and persists work. A worker claims a lease, runs the existing agent loop, and heartbeats. Interrupted executions can be recovered within attempt limits. This is still local SQLite + asyncio — not a Google Cloud deployment.
 
 ## Problem
 
@@ -33,41 +33,72 @@ That is not a collection of classes named "agent." The loop:
 - Stops when the plan is done, a loop limit is reached, or a tool/agent failure occurs.
 - Produces a final report that distinguishes observed facts from interpretation.
 
+> **Round 4 focus:** Durable asynchronous missions. The API submits and persists work. A worker claims a lease, runs the existing agent loop, and heartbeats. Interrupted executions can be recovered within attempt limits. This is still local SQLite + asyncio — not a Google Cloud deployment.
+
 ## Architecture
 
 ```mermaid
 flowchart TD
-    Client[Client] -->|POST /datasets| API[FastAPI]
-    Client -->|POST /missions| API
-    Client -->|GET /missions/id| API
-    API --> MissionService
-    MissionService --> SQLite[(SQLite metadata)]
-    MissionService --> Uploads[Local dataset files]
-    MissionService -->|202 then asyncio| Workflow
-
-    subgraph workflow [Mission workflow]
-        Planner[Planner: ADK or local]
-        Loop[Agent loop]
-        Planner --> Loop
-        Loop --> Tools[Constrained tools]
-        Tools --> Evidence[Observed facts]
-        Evidence --> Policy[Adaptive policy]
-        Policy -->|more work| Tools
-        Evidence --> Reasoner[Reasoner: ADK or local]
-        Reasoner --> Report[Structured report]
-    end
-
-    Workflow --> Planner
+    Client[Client] -->|POST /missions| API[FastAPI]
+    API --> Service[Mission service]
+    Service --> SQLite[(SQLite: mission + lease + idempotency)]
+    Service -->|dispatch| Dispatcher[Dispatcher]
+    Dispatcher -->|local asyncio| Worker[Mission worker]
+    Dispatcher -.->|future| PubSub[Pub/Sub - not deployed]
+    Worker -->|claim lease| SQLite
+    Worker --> Workflow[Existing planner + agent loop]
+    Recover[Recovery service] -->|expired lease| SQLite
+    Recover -->|requeue| Dispatcher
 ```
 
-Replaceable later (not implemented in this round): Cloud Storage, Firestore, Pub/Sub, Cloud Run, specialized agents, persistent memory.
+Local development uses `ATLAS_DISPATCHER=local`. A Pub/Sub dispatcher class exists only as an explicit stub; selecting it does not publish messages or require GCP.
 
-### Mission lifecycle
+### Mission lifecycle vs execution state
+
+Lifecycle (unchanged):
 
 ```
 CREATED → PLANNING → EXECUTING → COMPLETED
                               └→ FAILED
 ```
+
+Worker/dispatch state (durable, separate):
+
+```
+QUEUED → CLAIMED → RUNNING → COMPLETED
+                           └→ FAILED
+                           └→ EXHAUSTED (max attempts after lease expiry)
+```
+
+The API does not run the long-lived workflow inline. It persists the mission as `QUEUED` and dispatches. GET `/missions/{id}` includes `execution` metadata: state, attempt count, whether currently claimed, worker id while the lease is valid.
+
+### Claiming and leases
+
+A worker claims a mission with a SQLite `BEGIN IMMEDIATE` update. Only one worker can hold a valid lease. Updates from the workflow must present the same `execution_id` and `worker_id`; otherwise they fail as stale. Completed and failed missions cannot be claimed again.
+
+If the worker disappears, the lease expires. Another worker may claim the expired row, or recovery may requeue it.
+
+### Recovery
+
+`MissionRecoveryService.recover()` (also `POST /ops/recover-missions` for local/dev) finds incomplete missions whose leases have expired:
+
+- If attempts remain: clear the lease, mark `QUEUED`, emit `LEASE_EXPIRED` / `MISSION_RECOVERED`, dispatch again.
+- If `attempt_count >= max_attempts`: mark lifecycle `FAILED` and execution `EXHAUSTED`. Do not dispatch.
+- Never touches `COMPLETED` or `FAILED` missions.
+
+This is an explicit call, not a standing scheduler. Recovery re-dispatches the workflow from the start of planning; it does not checkpoint mid-agent-loop.
+
+### Idempotency
+
+`POST /missions` accepts optional `idempotency_key` (max 128 characters). Scope is this local database:
+
+- Same key + same `{goal, dataset_id}` → return the existing mission (HTTP 202).
+- Same key + different payload → HTTP 409.
+- No key → previous create-always behavior.
+
+### Future Google Cloud path
+
+The dispatcher interface is what Cloud Run workers plus Pub/Sub would replace. Firestore could later store the same lease columns. None of those services are provisioned or called in this round.
 
 Dataset missions run the agent loop during `EXECUTING`. Missions without a `dataset_id` keep the Round 1 generic lifecycle.
 
@@ -253,7 +284,15 @@ curl -X POST http://localhost:8000/missions \
   -d "{\"goal\": \"Analyze this survey dataset, identify the most important quality problems, investigate what may be causing them, and tell me what should be fixed first.\", \"dataset_id\": \"YOUR_DATASET_ID\"}"
 ```
 
-Returns immediately with HTTP 202. Unknown `dataset_id` values return 404.
+Returns immediately with HTTP 202. Unknown `dataset_id` values return 404. Optional `idempotency_key` makes retries safe.
+
+**Recover abandoned executions (local/dev)**
+
+```bash
+curl -X POST http://localhost:8000/ops/recover-missions
+```
+
+Requeues missions with expired leases, within attempt limits. Not a production control plane.
 
 **Create a Round 1 mission (no dataset)**
 
@@ -269,7 +308,7 @@ curl -X POST http://localhost:8000/missions \
 curl http://localhost:8000/missions/{mission_id}
 ```
 
-When a dataset mission completes, the payload includes `agent_plan`, `tool_invocations`, `evidence_records`, `interpretations`, `events`, and `investigation_report`.
+When a dataset mission completes, the payload includes `agent_plan`, `tool_invocations`, `evidence_records`, `interpretations`, `events`, `execution`, and `investigation_report`.
 
 ## Investigation measurements
 
@@ -344,6 +383,15 @@ pytest -v
 - Configurable loop limits
 - Local fallback remains fully testable; Gemini/ADK path remains wired
 
+### Round 4
+
+- Mission submission is separate from worker execution
+- Durable SQLite execution metadata and exclusive leases
+- Local dispatcher with a replaceable (unimplemented) Pub/Sub stub
+- Bounded recovery of expired leases
+- Optional idempotency keys on mission create
+- Operational events: queued, claimed, lease expired, recovered, attempt failed, exhausted
+
 ## Known limitations
 
 - CSV only (no XLSX, PDF, or other formats)
@@ -351,8 +399,9 @@ pytest -v
 - Adaptive branches are a defined evidence-driven policy, not an unbounded model-authored workflow
 - When Gemini is configured, it selects initial tools and interprets findings; tool execution stays inside ATLAS so evidence and limits remain controlled
 - Step execution for missions *without* a dataset is still a lifecycle demonstration, not domain work
-- Local filesystem + SQLite (not Cloud Storage / Firestore yet)
-- Local asyncio background tasks (not Pub/Sub)
+- Local filesystem + SQLite (not Cloud Storage / Firestore)
+- Local asyncio dispatch (Pub/Sub and Cloud Run are not deployed)
+- Recovery is on-demand, not a standing scheduler, and restarts the workflow rather than resuming mid-loop
 - No frontend, authentication, or production deployment
 - This repo's tests always use the local fallback
 

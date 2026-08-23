@@ -80,6 +80,8 @@ async def test_mission_lifecycle_transitions(client: AsyncClient) -> None:
 
     event_types = [event["type"] for event in final_mission["events"]]
     assert "MISSION_CREATED" in event_types
+    assert "MISSION_QUEUED" in event_types
+    assert "MISSION_CLAIMED" in event_types
     assert "PLANNING_STARTED" in event_types
     assert "EXECUTION_PLAN_GENERATED" in event_types
     assert "EXECUTION_STARTED" in event_types

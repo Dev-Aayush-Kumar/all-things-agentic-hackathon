@@ -1,43 +1,46 @@
 """Mission business logic."""
 
-from atlas.agent.base import MissionPlanner
-from atlas.domain.enums import EventType
+from atlas.domain.enums import EventType, ExecutionState, MissionStatus
 from atlas.domain.exceptions import DatasetNotFoundError
 from atlas.domain.models import (
     CreateMissionResponse,
     Mission,
     MissionDetailResponse,
     MissionEvent,
+    MissionExecution,
 )
-from atlas.execution.base import BackgroundExecutor
+from atlas.execution.dispatcher import MissionDispatcher
+from atlas.execution.idempotency import mission_fingerprint, normalize_idempotency_key
+from atlas.execution.recovery import MissionRecoveryService, RecoveryResult
+from atlas.config.settings import Settings
 from atlas.persistence.base import MissionRepository
 from atlas.persistence.dataset_base import DatasetRepository
-from atlas.workflow.mission_runner import MissionWorkflowRunner
 
 
 class MissionService:
-    """Coordinates mission creation and background workflow execution."""
+    """Coordinates mission submission. Long-running work is dispatched to workers."""
 
     def __init__(
         self,
         repository: MissionRepository,
-        planner: MissionPlanner,
-        background_executor: BackgroundExecutor,
-        workflow_runner: MissionWorkflowRunner,
+        dispatcher: MissionDispatcher,
+        recovery: MissionRecoveryService,
+        settings: Settings,
         dataset_repository: DatasetRepository | None = None,
     ) -> None:
         self._repository = repository
-        self._planner = planner
-        self._background_executor = background_executor
-        self._workflow_runner = workflow_runner
+        self._dispatcher = dispatcher
+        self._recovery = recovery
+        self._settings = settings
         self._dataset_repository = dataset_repository
 
     async def create_mission(
         self,
         goal: str,
         dataset_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> CreateMissionResponse:
-        """Create a mission and start background workflow."""
+        """Persist a queued mission and dispatch it. Does not run the workflow inline."""
         if dataset_id:
             if self._dataset_repository is None:
                 raise DatasetNotFoundError(dataset_id)
@@ -45,7 +48,14 @@ class MissionService:
             if dataset is None:
                 raise DatasetNotFoundError(dataset_id)
 
-        mission = Mission(goal=goal.strip(), dataset_id=dataset_id)
+        mission = Mission(
+            goal=goal.strip(),
+            dataset_id=dataset_id,
+            execution=MissionExecution(
+                state=ExecutionState.QUEUED,
+                max_attempts=self._settings.max_execution_attempts,
+            ),
+        )
         metadata: dict = {"goal": mission.goal}
         if dataset_id:
             metadata["dataset_id"] = dataset_id
@@ -56,11 +66,26 @@ class MissionService:
                 metadata=metadata,
             )
         )
-        await self._repository.create(mission)
-
-        self._background_executor.submit(
-            lambda: self._workflow_runner.run(mission.mission_id)
+        mission.events.append(
+            MissionEvent(
+                type=EventType.MISSION_QUEUED,
+                message="Mission queued for dispatch",
+                metadata={"dispatcher": self._dispatcher.backend_name},
+            )
         )
+
+        key = normalize_idempotency_key(idempotency_key)
+        replayed = False
+        if key:
+            fingerprint = mission_fingerprint(mission.goal, mission.dataset_id)
+            mission, replayed = await self._repository.create_idempotent(
+                mission, key, fingerprint
+            )
+        else:
+            await self._repository.create(mission)
+
+        if self._should_dispatch(mission, replayed):
+            await self._dispatcher.dispatch(mission.mission_id)
 
         return CreateMissionResponse(
             mission_id=mission.mission_id,
@@ -75,3 +100,21 @@ class MissionService:
         if mission is None:
             return None
         return MissionDetailResponse.from_mission(mission)
+
+    async def recover_abandoned(self) -> RecoveryResult:
+        """Requeue or exhaust missions with expired leases."""
+        return await self._recovery.recover()
+
+    @staticmethod
+    def _should_dispatch(mission: Mission, replayed: bool) -> bool:
+        if mission.status in {MissionStatus.COMPLETED, MissionStatus.FAILED}:
+            return False
+        if mission.execution.state in {
+            ExecutionState.COMPLETED,
+            ExecutionState.FAILED,
+            ExecutionState.EXHAUSTED,
+        }:
+            return False
+        if not replayed:
+            return True
+        return mission.execution.state == ExecutionState.QUEUED and not mission.execution.is_claimed()

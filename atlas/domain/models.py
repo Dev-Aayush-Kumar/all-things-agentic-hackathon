@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from atlas.domain.enums import (
     AgentPhase,
     EventType,
+    ExecutionState,
     FindingCategory,
     MissionStatus,
     PlannerSource,
@@ -248,6 +249,57 @@ class MissionEvent(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class MissionExecution(BaseModel):
+    """Durable worker/dispatch metadata for a mission."""
+
+    state: ExecutionState = ExecutionState.QUEUED
+    execution_id: str | None = None
+    worker_id: str | None = None
+    claimed_at: datetime | None = None
+    lease_expires_at: datetime | None = None
+    heartbeat_at: datetime | None = None
+    attempt_count: int = 0
+    max_attempts: int = 3
+    last_error: str | None = None
+
+    def is_claimed(self, now: datetime | None = None) -> bool:
+        """Whether a worker currently holds a valid lease."""
+        if self.state not in {ExecutionState.CLAIMED, ExecutionState.RUNNING}:
+            return False
+        if self.worker_id is None or self.execution_id is None:
+            return False
+        current = now or utc_now()
+        if self.lease_expires_at is not None and self.lease_expires_at <= current:
+            return False
+        return True
+
+
+class MissionExecutionPublic(BaseModel):
+    """Safe execution metadata for API responses."""
+
+    state: ExecutionState
+    attempt_count: int
+    max_attempts: int
+    claimed: bool
+    worker_id: str | None = None
+    execution_id: str | None = None
+    lease_expires_at: datetime | None = None
+    last_error: str | None = None
+
+    @classmethod
+    def from_execution(cls, execution: MissionExecution) -> "MissionExecutionPublic":
+        return cls(
+            state=execution.state,
+            attempt_count=execution.attempt_count,
+            max_attempts=execution.max_attempts,
+            claimed=execution.is_claimed(),
+            worker_id=execution.worker_id if execution.is_claimed() else None,
+            execution_id=execution.execution_id if execution.is_claimed() else None,
+            lease_expires_at=execution.lease_expires_at,
+            last_error=execution.last_error,
+        )
+
+
 class Mission(BaseModel):
     """Core mission aggregate."""
 
@@ -264,6 +316,7 @@ class Mission(BaseModel):
     evidence_records: list[EvidenceRecord] = Field(default_factory=list)
     interpretations: list[AgentInterpretation] = Field(default_factory=list)
     events: list[MissionEvent] = Field(default_factory=list)
+    execution: MissionExecution = Field(default_factory=MissionExecution)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     completed_at: datetime | None = None
@@ -279,6 +332,7 @@ class CreateMissionRequest(BaseModel):
 
     goal: str
     dataset_id: str | None = None
+    idempotency_key: str | None = Field(default=None, max_length=128)
 
 
 class CreateMissionResponse(BaseModel):
@@ -306,6 +360,7 @@ class MissionDetailResponse(BaseModel):
     evidence_records: list[EvidenceRecord] = Field(default_factory=list)
     interpretations: list[AgentInterpretation] = Field(default_factory=list)
     events: list[MissionEvent]
+    execution: MissionExecutionPublic | None = None
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None = None
@@ -328,6 +383,7 @@ class MissionDetailResponse(BaseModel):
             evidence_records=mission.evidence_records,
             interpretations=mission.interpretations,
             events=mission.events,
+            execution=MissionExecutionPublic.from_execution(mission.execution),
             created_at=mission.created_at,
             updated_at=mission.updated_at,
             completed_at=mission.completed_at,

@@ -81,6 +81,19 @@ class Settings(BaseSettings):
         default=120.0, alias="ATLAS_AGENT_MAX_RUNTIME_SECONDS"
     )
 
+    # Durable execution
+    dispatcher: str = Field(default="local", alias="ATLAS_DISPATCHER")
+    worker_id: str | None = Field(default=None, alias="ATLAS_WORKER_ID")
+    execution_lease_seconds: float = Field(
+        default=30.0, alias="ATLAS_EXECUTION_LEASE_SECONDS"
+    )
+    execution_heartbeat_seconds: float = Field(
+        default=10.0, alias="ATLAS_EXECUTION_HEARTBEAT_SECONDS"
+    )
+    max_execution_attempts: int = Field(
+        default=3, alias="ATLAS_MAX_EXECUTION_ATTEMPTS"
+    )
+
     @property
     def resolved_planner_backend(self) -> PlannerBackend:
         """Determine which planner backend to use."""

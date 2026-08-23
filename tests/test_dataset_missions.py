@@ -167,4 +167,5 @@ async def test_parse_failure_marks_mission_failed(client: AsyncClient) -> None:
     assert final["error"]
     event_types = [event["type"] for event in final["events"]]
     assert "MISSION_FAILED" in event_types
+    assert "ATTEMPT_FAILED" in event_types
     assert final["investigation_report"] is None

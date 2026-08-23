@@ -4,7 +4,9 @@ from functools import lru_cache
 
 from atlas.agent.factory import create_investigation_reasoner, create_mission_planner
 from atlas.config.settings import Settings, get_settings
-from atlas.execution.factory import create_background_executor
+from atlas.execution.factory import create_dispatcher
+from atlas.execution.recovery import MissionRecoveryService
+from atlas.execution.worker import MissionWorker
 from atlas.persistence.factory import create_dataset_repository, create_mission_repository
 from atlas.services.dataset_service import DatasetService
 from atlas.services.mission_service import MissionService
@@ -39,7 +41,6 @@ def get_mission_service() -> MissionService:
     dataset_storage = create_dataset_storage(settings)
     planner = create_mission_planner(settings)
     reasoner = create_investigation_reasoner(settings)
-    background_executor = create_background_executor()
     step_executor = StepExecutor(settings)
     workflow_runner = MissionWorkflowRunner(
         repository=repository,
@@ -51,10 +52,17 @@ def get_mission_service() -> MissionService:
         settings=settings,
         step_delay_seconds=settings.step_execution_delay_seconds,
     )
+    worker = MissionWorker(
+        repository=repository,
+        workflow_runner=workflow_runner,
+        settings=settings,
+    )
+    dispatcher = create_dispatcher(settings, worker)
+    recovery = MissionRecoveryService(repository=repository, dispatcher=dispatcher)
     return MissionService(
         repository=repository,
-        planner=planner,
-        background_executor=background_executor,
-        workflow_runner=workflow_runner,
+        dispatcher=dispatcher,
+        recovery=recovery,
+        settings=settings,
         dataset_repository=dataset_repository,
     )

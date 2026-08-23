@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from contextvars import ContextVar
 
 from atlas.agent.base import MissionPlanner
 from atlas.agent.factory import resolve_initial_tools
@@ -9,9 +10,10 @@ from atlas.agent.loop import AgentLoop
 from atlas.agent.reasoner_base import InvestigationReasoner
 from atlas.agent.tools import ToolContext
 from atlas.config.settings import Settings
-from atlas.domain.enums import EventType, MissionStatus, StepStatus
-from atlas.domain.exceptions import DatasetParseError
+from atlas.domain.enums import EventType, ExecutionState, MissionStatus, StepStatus
+from atlas.domain.exceptions import DatasetParseError, StaleExecutionError
 from atlas.domain.models import Mission, MissionEvent, utc_now
+from atlas.execution.context import ExecutionContext
 from atlas.investigation.parser import parse_csv_bytes
 from atlas.persistence.base import MissionRepository
 from atlas.persistence.dataset_base import DatasetRepository
@@ -19,6 +21,10 @@ from atlas.storage.base import DatasetStorage
 from atlas.workflow.step_executor import StepExecutor
 
 logger = logging.getLogger(__name__)
+
+_execution_context: ContextVar[ExecutionContext | None] = ContextVar(
+    "atlas_execution_context", default=None
+)
 
 
 class MissionWorkflowRunner:
@@ -44,19 +50,35 @@ class MissionWorkflowRunner:
         self._settings = settings
         self._step_delay_seconds = step_delay_seconds
 
-    async def run(self, mission_id: str) -> None:
+    async def run(
+        self,
+        mission_id: str,
+        context: ExecutionContext | None = None,
+    ) -> None:
         """Execute planning and step execution for a mission."""
-        mission = await self._repository.get(mission_id)
-        if mission is None:
-            logger.error("Mission %s not found for workflow execution", mission_id)
-            return
-
+        token = _execution_context.set(context)
         try:
-            await self._plan(mission)
-            await self._execute(mission)
-        except Exception as exc:
-            logger.exception("Mission %s failed", mission_id)
-            await self._fail_mission(mission, str(exc))
+            mission = await self._repository.get(mission_id)
+            if mission is None:
+                logger.error("Mission %s not found for workflow execution", mission_id)
+                return
+
+            try:
+                await self._plan(mission)
+                await self._execute(mission)
+            except StaleExecutionError:
+                logger.warning("Lost execution ownership for mission %s", mission_id)
+                return
+            except Exception as exc:
+                logger.exception("Mission %s failed", mission_id)
+                try:
+                    await self._fail_mission(mission, str(exc))
+                except StaleExecutionError:
+                    logger.warning(
+                        "Lost execution ownership while failing mission %s", mission_id
+                    )
+        finally:
+            _execution_context.reset(token)
 
     async def _plan(self, mission: Mission) -> None:
         mission.status = MissionStatus.PLANNING
@@ -67,7 +89,7 @@ class MissionWorkflowRunner:
             "Planning started",
             {"planner": self._planner.source_name},
         )
-        await self._repository.update(mission)
+        await self._persist(mission)
 
         plan = await self._planner.create_plan(mission.goal, mission.dataset_id)
         mission.execution_plan = plan
@@ -81,7 +103,7 @@ class MissionWorkflowRunner:
             },
         )
         mission.touch()
-        await self._repository.update(mission)
+        await self._persist(mission)
 
     async def _execute(self, mission: Mission) -> None:
         if mission.execution_plan is None:
@@ -90,7 +112,7 @@ class MissionWorkflowRunner:
         mission.status = MissionStatus.EXECUTING
         mission.touch()
         self._add_event(mission, EventType.EXECUTION_STARTED, "Execution started")
-        await self._repository.update(mission)
+        await self._persist(mission)
 
         if mission.dataset_id:
             await self._execute_investigation(mission)
@@ -99,9 +121,11 @@ class MissionWorkflowRunner:
 
         mission.status = MissionStatus.COMPLETED
         mission.completed_at = utc_now()
+        mission.execution.state = ExecutionState.COMPLETED
+        mission.execution.lease_expires_at = None
         mission.touch()
         self._add_event(mission, EventType.MISSION_COMPLETED, "Mission completed")
-        await self._repository.update(mission)
+        await self._persist(mission)
 
     async def _execute_generic_steps(self, mission: Mission) -> None:
         assert mission.execution_plan is not None
@@ -113,7 +137,7 @@ class MissionWorkflowRunner:
                 {"step_id": step.id},
             )
             mission.touch()
-            await self._repository.update(mission)
+            await self._persist(mission)
 
             updated_step = await self._step_executor.execute(step, mission.goal)
             step.status = updated_step.status
@@ -128,7 +152,7 @@ class MissionWorkflowRunner:
                     {"step_id": step.id, "error": step.error},
                 )
                 mission.touch()
-                await self._repository.update(mission)
+                await self._persist(mission)
                 raise RuntimeError(step.error or f"Step {step.id} failed")
 
             self._add_event(
@@ -138,7 +162,7 @@ class MissionWorkflowRunner:
                 {"step_id": step.id},
             )
             mission.touch()
-            await self._repository.update(mission)
+            await self._persist(mission)
 
     async def _execute_investigation(self, mission: Mission) -> None:
         if self._dataset_repository is None or self._dataset_storage is None:
@@ -169,7 +193,7 @@ class MissionWorkflowRunner:
                 "original_filename": dataset.original_filename,
             },
         )
-        await self._repository.update(mission)
+        await self._persist(mission)
 
         selected_tools, plan_source = await resolve_initial_tools(
             mission.goal, self._settings
@@ -189,7 +213,7 @@ class MissionWorkflowRunner:
 
         async def persist() -> None:
             mission.touch()
-            await self._repository.update(mission)
+            await self._persist(mission)
 
         await loop.run(mission, context, persist)
 
@@ -197,14 +221,33 @@ class MissionWorkflowRunner:
         mission.status = MissionStatus.FAILED
         mission.error = error
         mission.completed_at = utc_now()
+        mission.execution.state = ExecutionState.FAILED
+        mission.execution.last_error = error
+        mission.execution.lease_expires_at = None
         mission.touch()
+        self._add_event(
+            mission,
+            EventType.ATTEMPT_FAILED,
+            "Execution attempt failed",
+            {
+                "error": error,
+                "attempt_count": mission.execution.attempt_count,
+            },
+        )
         self._add_event(
             mission,
             EventType.MISSION_FAILED,
             "Mission failed",
             {"error": error},
         )
-        await self._repository.update(mission)
+        await self._persist(mission)
+
+    async def _persist(self, mission: Mission) -> None:
+        context = _execution_context.get()
+        if context is None:
+            await self._repository.update(mission)
+            return
+        await self._repository.update_owned(mission, context)
 
     @staticmethod
     def _add_event(

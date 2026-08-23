@@ -1,11 +1,22 @@
 """Background execution layer."""
 
 from atlas.execution.base import BackgroundExecutor
-from atlas.execution.factory import create_background_executor
+from atlas.execution.context import ExecutionContext
+from atlas.execution.dispatcher import LocalAsyncDispatcher, MissionDispatcher, PubSubDispatcherStub
+from atlas.execution.factory import create_background_executor, create_dispatcher
 from atlas.execution.local_executor import LocalBackgroundExecutor
+from atlas.execution.recovery import MissionRecoveryService
+from atlas.execution.worker import MissionWorker
 
 __all__ = [
     "BackgroundExecutor",
+    "ExecutionContext",
+    "LocalAsyncDispatcher",
     "LocalBackgroundExecutor",
+    "MissionDispatcher",
+    "MissionRecoveryService",
+    "MissionWorker",
+    "PubSubDispatcherStub",
     "create_background_executor",
+    "create_dispatcher",
 ]

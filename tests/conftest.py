@@ -12,6 +12,7 @@ from httpx import ASGITransport, AsyncClient
 # Force local fallback and fast execution before app import
 os.environ.setdefault("PLANNER_BACKEND", "local")
 os.environ.setdefault("ATLAS_STEP_DELAY_SECONDS", "0")
+os.environ.setdefault("ATLAS_EXECUTION_HEARTBEAT_SECONDS", "0.2")
 
 from atlas.api.dependencies import (
     get_app_settings,
@@ -33,6 +34,7 @@ def test_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
         upload_dir = Path(tmpdir) / "uploads"
         monkeypatch.setenv("PLANNER_BACKEND", "local")
         monkeypatch.setenv("ATLAS_STEP_DELAY_SECONDS", "0")
+        monkeypatch.setenv("ATLAS_EXECUTION_HEARTBEAT_SECONDS", "0.2")
         monkeypatch.setenv("GOOGLE_API_KEY", "")
         monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "false")
         monkeypatch.setenv("ATLAS_DATABASE_PATH", str(db_path))

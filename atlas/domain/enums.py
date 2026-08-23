@@ -13,6 +13,17 @@ class MissionStatus(str, Enum):
     FAILED = "FAILED"
 
 
+class ExecutionState(str, Enum):
+    """Worker/dispatch state, distinct from mission lifecycle."""
+
+    QUEUED = "QUEUED"
+    CLAIMED = "CLAIMED"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    EXHAUSTED = "EXHAUSTED"
+
+
 class StepStatus(str, Enum):
     """Lifecycle states for a plan step."""
 
@@ -40,6 +51,12 @@ class EventType(str, Enum):
     """Types of mission events."""
 
     MISSION_CREATED = "MISSION_CREATED"
+    MISSION_QUEUED = "MISSION_QUEUED"
+    MISSION_CLAIMED = "MISSION_CLAIMED"
+    LEASE_EXPIRED = "LEASE_EXPIRED"
+    MISSION_RECOVERED = "MISSION_RECOVERED"
+    ATTEMPT_FAILED = "ATTEMPT_FAILED"
+    EXECUTION_EXHAUSTED = "EXECUTION_EXHAUSTED"
     PLANNING_STARTED = "PLANNING_STARTED"
     EXECUTION_PLAN_GENERATED = "EXECUTION_PLAN_GENERATED"
     EXECUTION_STARTED = "EXECUTION_STARTED"
