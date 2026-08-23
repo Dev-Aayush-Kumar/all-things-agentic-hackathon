@@ -4,54 +4,21 @@ import asyncio
 import logging
 
 from atlas.agent.base import MissionPlanner
+from atlas.agent.factory import resolve_initial_tools
+from atlas.agent.loop import AgentLoop
 from atlas.agent.reasoner_base import InvestigationReasoner
+from atlas.agent.tools import ToolContext
+from atlas.config.settings import Settings
 from atlas.domain.enums import EventType, MissionStatus, StepStatus
 from atlas.domain.exceptions import DatasetParseError
 from atlas.domain.models import Mission, MissionEvent, utc_now
-from atlas.investigation.pipeline import InvestigationPipeline, StageResult
-from atlas.investigation.report import build_report
+from atlas.investigation.parser import parse_csv_bytes
 from atlas.persistence.base import MissionRepository
 from atlas.persistence.dataset_base import DatasetRepository
 from atlas.storage.base import DatasetStorage
 from atlas.workflow.step_executor import StepExecutor
 
 logger = logging.getLogger(__name__)
-
-STAGE_EVENTS = {
-    "profile": (
-        EventType.DATASET_PROFILE_COMPLETED,
-        "Dataset profile completed",
-    ),
-    "missing": (
-        EventType.MISSING_DATA_ANALYSIS_COMPLETED,
-        "Missing data analysis completed",
-    ),
-    "duplicates": (
-        EventType.DUPLICATE_ANALYSIS_COMPLETED,
-        "Duplicate analysis completed",
-    ),
-    "type_format": (
-        EventType.TYPE_FORMAT_ANALYSIS_COMPLETED,
-        "Type/format analysis completed",
-    ),
-    "outliers": (
-        EventType.OUTLIER_ANALYSIS_COMPLETED,
-        "Outlier analysis completed",
-    ),
-    "consistency": (
-        EventType.CONSISTENCY_ANALYSIS_COMPLETED,
-        "Consistency analysis completed",
-    ),
-}
-
-STAGE_STEP_KEYWORDS = {
-    "profile": ("inspect", "profile", "understand"),
-    "missing": ("missing",),
-    "duplicates": ("duplicate",),
-    "type_format": ("type", "format"),
-    "outliers": ("outlier",),
-    "consistency": ("consisten",),
-}
 
 
 class MissionWorkflowRunner:
@@ -65,6 +32,7 @@ class MissionWorkflowRunner:
         dataset_repository: DatasetRepository | None = None,
         dataset_storage: DatasetStorage | None = None,
         reasoner: InvestigationReasoner | None = None,
+        settings: Settings | None = None,
         step_delay_seconds: float = 0.0,
     ) -> None:
         self._repository = repository
@@ -73,7 +41,7 @@ class MissionWorkflowRunner:
         self._dataset_repository = dataset_repository
         self._dataset_storage = dataset_storage
         self._reasoner = reasoner
-        self._pipeline = InvestigationPipeline()
+        self._settings = settings
         self._step_delay_seconds = step_delay_seconds
 
     async def run(self, mission_id: str) -> None:
@@ -175,8 +143,8 @@ class MissionWorkflowRunner:
     async def _execute_investigation(self, mission: Mission) -> None:
         if self._dataset_repository is None or self._dataset_storage is None:
             raise RuntimeError("Dataset investigation dependencies are not configured")
-        if self._reasoner is None:
-            raise RuntimeError("Investigation reasoner is not configured")
+        if self._reasoner is None or self._settings is None:
+            raise RuntimeError("Agent loop dependencies are not configured")
 
         dataset = await self._dataset_repository.get(mission.dataset_id or "")
         if dataset is None:
@@ -184,7 +152,7 @@ class MissionWorkflowRunner:
 
         try:
             content = await self._dataset_storage.load(dataset.stored_filename)
-            frame = await asyncio.to_thread(self._pipeline.parse, content)
+            frame = await asyncio.to_thread(parse_csv_bytes, content)
         except DatasetParseError:
             raise
         except FileNotFoundError as exc:
@@ -199,134 +167,31 @@ class MissionWorkflowRunner:
             {
                 "dataset_id": dataset.dataset_id,
                 "original_filename": dataset.original_filename,
-                "row_preview_bytes": len(content),
             },
         )
-        await self._mark_matching_steps(mission, ("understand",), "Goal recorded; investigation started")
-        mission.touch()
         await self._repository.update(mission)
-        await self._pause()
 
-        stages: list[StageResult] = []
-        for stage_name in self._pipeline.stage_names:
-            stage = await asyncio.to_thread(self._pipeline.run_stage, stage_name, frame)
-            stages.append(stage)
-            stages.append(stage)
-            event_type, message = STAGE_EVENTS[stage.name]
-            metadata: dict = {"stage": stage.name, "finding_count": len(stage.findings)}
-            if stage.profile is not None:
-                metadata["row_count"] = stage.profile.row_count
-                metadata["column_count"] = stage.profile.column_count
-            self._add_event(mission, event_type, message, metadata)
-            await self._mark_matching_steps(
-                mission,
-                STAGE_STEP_KEYWORDS.get(stage.name, ()),
-                message,
-            )
-            mission.touch()
-            await self._repository.update(mission)
-            await self._pause()
-
-        result = self._pipeline.assemble(frame, stages)
-        self._add_event(
-            mission,
-            EventType.FINDINGS_PRIORITIZED,
-            "Findings prioritized",
-            {"finding_count": len(result.findings)},
+        selected_tools, plan_source = await resolve_initial_tools(
+            mission.goal, self._settings
         )
-        await self._mark_matching_steps(
-            mission,
-            ("priorit",),
-            f"Prioritized {len(result.findings)} finding(s)",
+        loop = AgentLoop(
+            reasoner=self._reasoner,
+            settings=self._settings,
+            plan_source=plan_source,
+            selected_tools=selected_tools,
+            step_delay_seconds=self._step_delay_seconds,
         )
-        mission.touch()
-        await self._repository.update(mission)
-        await self._pause()
-
-        reasoning = await self._reasoner.interpret(
-            mission.goal,
-            result.profile,
-            result.findings,
-        )
-        mission.investigation_report = build_report(
+        context = ToolContext(
             dataset_id=dataset.dataset_id,
             original_filename=dataset.original_filename,
-            result=result,
-            mission_summary=reasoning.mission_summary,
-            investigation_summary=reasoning.investigation_summary,
-            overall_assessment=reasoning.overall_assessment,
-            recommended_actions=reasoning.recommended_actions,
-            reasoning_source=reasoning.source,
+            frame=frame,
         )
-        self._add_event(
-            mission,
-            EventType.FINAL_REPORT_GENERATED,
-            "Final report generated",
-            {
-                "finding_count": len(result.findings),
-                "reasoning_source": reasoning.source.value,
-            },
-        )
-        self._complete_remaining_steps(
-            mission,
-            f"Investigation complete with {len(result.findings)} finding(s).",
-        )
-        mission.touch()
-        await self._repository.update(mission)
 
-    async def _mark_matching_steps(
-        self,
-        mission: Mission,
-        keywords: tuple[str, ...],
-        result: str,
-    ) -> None:
-        if mission.execution_plan is None or not keywords:
-            return
-        for step in mission.execution_plan.steps:
-            haystack = f"{step.title} {step.description}".lower()
-            if step.status == StepStatus.COMPLETED:
-                continue
-            if any(keyword in haystack for keyword in keywords):
-                if step.status == StepStatus.PENDING:
-                    self._add_event(
-                        mission,
-                        EventType.STEP_STARTED,
-                        f"Step started: {step.title}",
-                        {"step_id": step.id},
-                    )
-                step.status = StepStatus.COMPLETED
-                step.result = result
-                self._add_event(
-                    mission,
-                    EventType.STEP_COMPLETED,
-                    f"Step completed: {step.title}",
-                    {"step_id": step.id},
-                )
+        async def persist() -> None:
+            mission.touch()
+            await self._repository.update(mission)
 
-    def _complete_remaining_steps(self, mission: Mission, result: str) -> None:
-        if mission.execution_plan is None:
-            return
-        for step in mission.execution_plan.steps:
-            if step.status == StepStatus.COMPLETED:
-                continue
-            self._add_event(
-                mission,
-                EventType.STEP_STARTED,
-                f"Step started: {step.title}",
-                {"step_id": step.id},
-            )
-            step.status = StepStatus.COMPLETED
-            step.result = result
-            self._add_event(
-                mission,
-                EventType.STEP_COMPLETED,
-                f"Step completed: {step.title}",
-                {"step_id": step.id},
-            )
-
-    async def _pause(self) -> None:
-        if self._step_delay_seconds > 0:
-            await asyncio.sleep(self._step_delay_seconds)
+        await loop.run(mission, context, persist)
 
     async def _fail_mission(self, mission: Mission, error: str) -> None:
         mission.status = MissionStatus.FAILED

@@ -30,6 +30,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        populate_by_name=True,
     )
 
     # Application
@@ -71,6 +72,13 @@ class Settings(BaseSettings):
     # Workflow timing (local dev / tests)
     step_execution_delay_seconds: float = Field(
         default=0.05, alias="ATLAS_STEP_DELAY_SECONDS"
+    )
+
+    # Agent loop safety limits
+    agent_max_iterations: int = Field(default=12, alias="ATLAS_AGENT_MAX_ITERATIONS")
+    agent_max_tool_calls: int = Field(default=10, alias="ATLAS_AGENT_MAX_TOOL_CALLS")
+    agent_max_runtime_seconds: float = Field(
+        default=120.0, alias="ATLAS_AGENT_MAX_RUNTIME_SECONDS"
     )
 
     @property

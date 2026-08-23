@@ -4,11 +4,14 @@ import logging
 
 from atlas.agent.adk_planner import AdkMissionPlanner
 from atlas.agent.adk_reasoner import AdkInvestigationReasoner
+from atlas.agent.adk_selector import select_tools_with_adk
 from atlas.agent.base import MissionPlanner
 from atlas.agent.local_planner import LocalFallbackPlanner
 from atlas.agent.local_reasoner import LocalFallbackReasoner
+from atlas.agent.policy import select_tools
 from atlas.agent.reasoner_base import InvestigationReasoner
 from atlas.config.settings import PlannerBackend, Settings
+from atlas.domain.enums import PlannerSource
 
 logger = logging.getLogger(__name__)
 
@@ -54,3 +57,15 @@ def create_investigation_reasoner(settings: Settings) -> InvestigationReasoner:
 
     logger.info("Using LOCAL_DEVELOPMENT_FALLBACK investigation reasoner")
     return LocalFallbackReasoner()
+
+
+async def resolve_initial_tools(goal: str, settings: Settings) -> tuple[list[str], PlannerSource]:
+    """Select initial tools using ADK when configured, otherwise local policy."""
+    backend = settings.resolved_planner_backend
+    if backend == PlannerBackend.ADK and settings.adk_configured:
+        selected = await select_tools_with_adk(goal, settings)
+        logger.info("ADK selected investigation tools: %s", selected)
+        return selected, PlannerSource.GEMINI_ADK
+    selected = select_tools(goal)
+    logger.info("Local policy selected investigation tools: %s", selected)
+    return selected, PlannerSource.LOCAL_FALLBACK

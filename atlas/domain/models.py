@@ -7,6 +7,7 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from atlas.domain.enums import (
+    AgentPhase,
     EventType,
     FindingCategory,
     MissionStatus,
@@ -117,6 +118,91 @@ class InvestigationReport(BaseModel):
     recommended_actions: list[RecommendedAction]
     overall_assessment: str
     reasoning_source: PlannerSource
+    interpretations: list["AgentInterpretation"] = Field(default_factory=list)
+    evidence_records: list["EvidenceRecord"] = Field(default_factory=list)
+
+
+class AgentTask(BaseModel):
+    """A single tool-backed task in the agent plan."""
+
+    task_id: str
+    tool_name: str
+    objective: str
+    depends_on: list[str] = Field(default_factory=list)
+    status: StepStatus = StepStatus.PENDING
+    adaptive: bool = False
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    evidence_id: str | None = None
+    result_summary: str | None = None
+    decision_reason: str | None = None
+
+
+class AgentPlan(BaseModel):
+    """Inspectable structured plan of what ATLAS intends to do."""
+
+    objective: str
+    source: PlannerSource
+    selected_tools: list[str]
+    tasks: list[AgentTask] = Field(default_factory=list)
+    status: str = "PENDING"
+    current_task_id: str | None = None
+    iteration: int = 0
+    max_iterations: int = 12
+    tool_call_count: int = 0
+
+    def to_execution_plan(self) -> ExecutionPlan:
+        """Project the agent plan onto the Round 1 execution-plan schema."""
+        steps = [
+            PlanStep(
+                id=task.task_id,
+                title=task.tool_name,
+                description=task.objective,
+                status=task.status,
+                result=task.result_summary,
+            )
+            for task in self.tasks
+        ]
+        return ExecutionPlan(
+            steps=steps,
+            planner_source=self.source,
+            summary=self.objective,
+        )
+
+
+class ToolInvocation(BaseModel):
+    """A recorded tool call for mission observability."""
+
+    invocation_id: str = Field(default_factory=lambda: str(uuid4()))
+    tool_name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    status: StepStatus = StepStatus.PENDING
+    evidence_id: str | None = None
+    error: str | None = None
+    adaptive: bool = False
+    started_at: datetime = Field(default_factory=utc_now)
+    completed_at: datetime | None = None
+
+
+class EvidenceRecord(BaseModel):
+    """Observed facts produced by a tool. Not agent interpretation."""
+
+    evidence_id: str = Field(default_factory=lambda: str(uuid4()))
+    tool_name: str
+    task_id: str | None = None
+    observed_facts: dict[str, Any] = Field(default_factory=dict)
+    finding_ids: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class AgentInterpretation(BaseModel):
+    """Agent reasoning about measured evidence. Must not invent metrics."""
+
+    interpretation_id: str = Field(default_factory=lambda: str(uuid4()))
+    kind: str
+    text: str
+    related_evidence_ids: list[str] = Field(default_factory=list)
+    related_finding_ids: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class DatasetRecord(BaseModel):
@@ -169,8 +255,14 @@ class Mission(BaseModel):
     goal: str
     dataset_id: str | None = None
     status: MissionStatus = MissionStatus.CREATED
+    current_phase: AgentPhase | None = None
+    current_task: str | None = None
     execution_plan: ExecutionPlan | None = None
+    agent_plan: AgentPlan | None = None
     investigation_report: InvestigationReport | None = None
+    tool_invocations: list[ToolInvocation] = Field(default_factory=list)
+    evidence_records: list[EvidenceRecord] = Field(default_factory=list)
+    interpretations: list[AgentInterpretation] = Field(default_factory=list)
     events: list[MissionEvent] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -205,8 +297,14 @@ class MissionDetailResponse(BaseModel):
     goal: str
     dataset_id: str | None = None
     status: MissionStatus
+    current_phase: AgentPhase | None = None
+    current_task: str | None = None
     execution_plan: ExecutionPlan | None
+    agent_plan: AgentPlan | None = None
     investigation_report: InvestigationReport | None = None
+    tool_invocations: list[ToolInvocation] = Field(default_factory=list)
+    evidence_records: list[EvidenceRecord] = Field(default_factory=list)
+    interpretations: list[AgentInterpretation] = Field(default_factory=list)
     events: list[MissionEvent]
     created_at: datetime
     updated_at: datetime
@@ -221,8 +319,14 @@ class MissionDetailResponse(BaseModel):
             goal=mission.goal,
             dataset_id=mission.dataset_id,
             status=mission.status,
+            current_phase=mission.current_phase,
+            current_task=mission.current_task,
             execution_plan=mission.execution_plan,
+            agent_plan=mission.agent_plan,
             investigation_report=mission.investigation_report,
+            tool_invocations=mission.tool_invocations,
+            evidence_records=mission.evidence_records,
+            interpretations=mission.interpretations,
             events=mission.events,
             created_at=mission.created_at,
             updated_at=mission.updated_at,
@@ -239,3 +343,8 @@ class HealthResponse(BaseModel):
     version: str
     planner_backend: str
     adk_configured: bool
+
+
+InvestigationReport.model_rebuild()
+Mission.model_rebuild()
+MissionDetailResponse.model_rebuild()

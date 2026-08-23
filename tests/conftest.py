@@ -33,6 +33,8 @@ def test_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
         upload_dir = Path(tmpdir) / "uploads"
         monkeypatch.setenv("PLANNER_BACKEND", "local")
         monkeypatch.setenv("ATLAS_STEP_DELAY_SECONDS", "0")
+        monkeypatch.setenv("GOOGLE_API_KEY", "")
+        monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "false")
         monkeypatch.setenv("ATLAS_DATABASE_PATH", str(db_path))
         monkeypatch.setenv("ATLAS_UPLOAD_DIR", str(upload_dir))
         get_settings.cache_clear()

@@ -48,6 +48,7 @@ def get_mission_service() -> MissionService:
         dataset_repository=dataset_repository,
         dataset_storage=dataset_storage,
         reasoner=reasoner,
+        settings=settings,
         step_delay_seconds=settings.step_execution_delay_seconds,
     )
     return MissionService(
