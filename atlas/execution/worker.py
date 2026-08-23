@@ -40,6 +40,11 @@ class MissionWorker:
         self._settings = settings
         self.worker_id = worker_id or settings.worker_id or f"local-{uuid4().hex[:8]}"
 
+    @property
+    def repository(self) -> MissionRepository:
+        """Authoritative mission store used by this worker."""
+        return self._repository
+
     async def execute(self, mission_id: str) -> None:
         """Claim a mission if possible and run its workflow under that lease."""
         claimed = await self._repository.claim(

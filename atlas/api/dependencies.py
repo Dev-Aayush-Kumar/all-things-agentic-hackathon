@@ -3,7 +3,7 @@
 from functools import lru_cache
 
 from atlas.agent.factory import create_investigation_reasoner, create_mission_planner
-from atlas.config.settings import Settings, get_settings
+from atlas.config.settings import DispatcherBackend, Settings, get_settings
 from atlas.execution.factory import create_dispatcher
 from atlas.execution.recovery import MissionRecoveryService
 from atlas.execution.worker import MissionWorker
@@ -21,6 +21,20 @@ def get_app_settings() -> Settings:
     return get_settings()
 
 
+def _build_workflow_runner(settings: Settings) -> MissionWorkflowRunner:
+    repository = create_mission_repository(settings)
+    return MissionWorkflowRunner(
+        repository=repository,
+        planner=create_mission_planner(settings),
+        step_executor=StepExecutor(settings),
+        dataset_repository=create_dataset_repository(settings),
+        dataset_storage=create_dataset_storage(settings),
+        reasoner=create_investigation_reasoner(settings),
+        settings=settings,
+        step_delay_seconds=settings.step_execution_delay_seconds,
+    )
+
+
 @lru_cache
 def get_dataset_service() -> DatasetService:
     """Build dataset service with configured storage and persistence."""
@@ -33,31 +47,26 @@ def get_dataset_service() -> DatasetService:
 
 
 @lru_cache
+def get_mission_worker() -> MissionWorker:
+    """Worker used by local dispatch and the Pub/Sub push endpoint."""
+    settings = get_app_settings()
+    return MissionWorker(
+        repository=create_mission_repository(settings),
+        workflow_runner=_build_workflow_runner(settings),
+        settings=settings,
+    )
+
+
+@lru_cache
 def get_mission_service() -> MissionService:
     """Build mission service with configured dependencies."""
     settings = get_app_settings()
     repository = create_mission_repository(settings)
     dataset_repository = create_dataset_repository(settings)
-    dataset_storage = create_dataset_storage(settings)
-    planner = create_mission_planner(settings)
-    reasoner = create_investigation_reasoner(settings)
-    step_executor = StepExecutor(settings)
-    workflow_runner = MissionWorkflowRunner(
-        repository=repository,
-        planner=planner,
-        step_executor=step_executor,
-        dataset_repository=dataset_repository,
-        dataset_storage=dataset_storage,
-        reasoner=reasoner,
-        settings=settings,
-        step_delay_seconds=settings.step_execution_delay_seconds,
-    )
-    worker = MissionWorker(
-        repository=repository,
-        workflow_runner=workflow_runner,
-        settings=settings,
-    )
-    dispatcher = create_dispatcher(settings, worker)
+    if settings.resolved_dispatcher == DispatcherBackend.PUBSUB:
+        dispatcher = create_dispatcher(settings)
+    else:
+        dispatcher = create_dispatcher(settings, get_mission_worker())
     recovery = MissionRecoveryService(repository=repository, dispatcher=dispatcher)
     return MissionService(
         repository=repository,

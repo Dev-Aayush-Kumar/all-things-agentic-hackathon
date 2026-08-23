@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from atlas.domain.enums import (
     AgentPhase,
+    AgentRole,
     EventType,
     ExecutionState,
     FindingCategory,
@@ -170,6 +171,72 @@ class AgentPlan(BaseModel):
         )
 
 
+class AgentDescriptor(BaseModel):
+    """Identity and authorized capabilities of a specialist agent."""
+
+    id: str
+    name: str
+    role: AgentRole
+    description: str
+    capabilities: list[str] = Field(default_factory=list)
+    allowed_tools: list[str] = Field(default_factory=list)
+
+
+class SpecialistFollowUp(BaseModel):
+    """Evidence-driven work a specialist recommends to the supervisor."""
+
+    capability: str
+    objective: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    critical: bool = False
+    reason: str = ""
+
+
+class SpecialistTaskResult(BaseModel):
+    """Structured result of a specialist task. Not a raw object dump."""
+
+    summary: str
+    finding_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    follow_ups: list[SpecialistFollowUp] = Field(default_factory=list)
+    notes: str | None = None
+    provenance: PlannerSource = PlannerSource.LOCAL_FALLBACK
+
+
+class SpecialistTask(BaseModel):
+    """First-class delegated work item assigned to a specialist agent."""
+
+    task_id: str = Field(default_factory=lambda: str(uuid4()))
+    mission_id: str
+    agent_id: str
+    objective: str
+    capability: str
+    inputs: dict[str, Any] = Field(default_factory=dict)
+    depends_on: list[str] = Field(default_factory=list)
+    status: StepStatus = StepStatus.PENDING
+    critical: bool = False
+    attempt_count: int = 0
+    max_attempts: int = 2
+    created_at: datetime = Field(default_factory=utc_now)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    result: SpecialistTaskResult | None = None
+    error: str | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class DelegationPlan(BaseModel):
+    """Supervisor-owned plan of specialist work. Persisted with the mission."""
+
+    objective: str
+    source: PlannerSource
+    status: str = "IN_PROGRESS"
+    tasks: list[SpecialistTask] = Field(default_factory=list)
+    wave: int = 0
+    replan_count: int = 0
+    current_task_ids: list[str] = Field(default_factory=list)
+
+
 class ToolInvocation(BaseModel):
     """A recorded tool call for mission observability."""
 
@@ -309,8 +376,12 @@ class Mission(BaseModel):
     status: MissionStatus = MissionStatus.CREATED
     current_phase: AgentPhase | None = None
     current_task: str | None = None
+    current_objective: str | None = None
     execution_plan: ExecutionPlan | None = None
     agent_plan: AgentPlan | None = None
+    delegation_plan: DelegationPlan | None = None
+    dataset_profile: DatasetProfile | None = None
+    findings: list[Finding] = Field(default_factory=list)
     investigation_report: InvestigationReport | None = None
     tool_invocations: list[ToolInvocation] = Field(default_factory=list)
     evidence_records: list[EvidenceRecord] = Field(default_factory=list)
@@ -353,8 +424,10 @@ class MissionDetailResponse(BaseModel):
     status: MissionStatus
     current_phase: AgentPhase | None = None
     current_task: str | None = None
+    current_objective: str | None = None
     execution_plan: ExecutionPlan | None
     agent_plan: AgentPlan | None = None
+    delegation_plan: DelegationPlan | None = None
     investigation_report: InvestigationReport | None = None
     tool_invocations: list[ToolInvocation] = Field(default_factory=list)
     evidence_records: list[EvidenceRecord] = Field(default_factory=list)
@@ -376,8 +449,10 @@ class MissionDetailResponse(BaseModel):
             status=mission.status,
             current_phase=mission.current_phase,
             current_task=mission.current_task,
+            current_objective=mission.current_objective,
             execution_plan=mission.execution_plan,
             agent_plan=mission.agent_plan,
+            delegation_plan=mission.delegation_plan,
             investigation_report=mission.investigation_report,
             tool_invocations=mission.tool_invocations,
             evidence_records=mission.evidence_records,
@@ -392,15 +467,26 @@ class MissionDetailResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    """Health check response."""
+    """Health check response. Never includes secrets."""
 
     status: str
     app: str
     version: str
+    runtime_mode: str
+    runtime_role: str
     planner_backend: str
+    planner_label: str
+    gemini_model: str
+    gemini_transport: str
+    gemini_meets_minimum: bool
+    persistence_backend: str
+    storage_backend: str
+    dispatcher_backend: str
     adk_configured: bool
 
 
+DelegationPlan.model_rebuild()
+SpecialistTask.model_rebuild()
 InvestigationReport.model_rebuild()
 Mission.model_rebuild()
 MissionDetailResponse.model_rebuild()

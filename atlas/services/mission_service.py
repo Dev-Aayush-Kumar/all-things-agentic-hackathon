@@ -1,7 +1,11 @@
 """Mission business logic."""
 
 from atlas.domain.enums import EventType, ExecutionState, MissionStatus
-from atlas.domain.exceptions import DatasetNotFoundError
+from atlas.domain.exceptions import (
+    CloudDispatchError,
+    CloudDispatchNotConfiguredError,
+    DatasetNotFoundError,
+)
 from atlas.domain.models import (
     CreateMissionResponse,
     Mission,
@@ -85,7 +89,12 @@ class MissionService:
             await self._repository.create(mission)
 
         if self._should_dispatch(mission, replayed):
-            await self._dispatcher.dispatch(mission.mission_id)
+            try:
+                await self._dispatcher.dispatch(mission.mission_id)
+            except (CloudDispatchError, CloudDispatchNotConfiguredError) as exc:
+                raise CloudDispatchError(
+                    f"Mission '{mission.mission_id}' was saved but dispatch failed: {exc}"
+                ) from exc
 
         return CreateMissionResponse(
             mission_id=mission.mission_id,

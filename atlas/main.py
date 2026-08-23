@@ -1,4 +1,4 @@
-"""ATLAS FastAPI application entry point."""
+"""ATLAS FastAPI application entry point (Cloud Run API / local server)."""
 
 import logging
 from contextlib import asynccontextmanager
@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from atlas import __version__
-from atlas.api.routes import datasets, health, missions, ops
+from atlas.api.routes import datasets, health, missions, ops, pubsub
 from atlas.config.settings import get_settings
 
 logging.basicConfig(
@@ -18,18 +18,17 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan handler."""
+    """Application lifespan handler. Logs backends, never secrets."""
     settings = get_settings()
-    backend = settings.resolved_planner_backend.value
+    diagnostics = settings.public_diagnostics()
     logger.info(
-        "Starting ATLAS v%s | environment=%s | planner=%s | adk_configured=%s",
+        "Starting ATLAS API v%s | environment=%s | %s",
         __version__,
         settings.environment.value,
-        backend,
-        settings.adk_configured,
+        diagnostics,
     )
     yield
-    logger.info("Shutting down ATLAS")
+    logger.info("Shutting down ATLAS API")
 
 
 def create_app() -> FastAPI:
@@ -45,6 +44,7 @@ def create_app() -> FastAPI:
     app.include_router(datasets.router)
     app.include_router(missions.router)
     app.include_router(ops.router)
+    app.include_router(pubsub.router)
     return app
 
 

@@ -40,15 +40,14 @@ Return ONLY JSON:
 
 
 async def select_tools_with_adk(goal: str, settings: Settings) -> list[str]:
-    """Ask Gemini via ADK which tools to run. Falls back to local policy on failure."""
+    """Ask Gemini via ADK which tools to run. Raises on ADK failure."""
     fallback = select_tools(goal)
     try:
         from google.adk import Agent
         from google.adk.apps import App
         from google.adk.runners import InMemoryRunner
-    except ImportError:
-        logger.warning("google-adk is not available; using local tool selection")
-        return fallback
+    except ImportError as exc:
+        raise RuntimeError("google-adk is not installed") from exc
 
     try:
         agent = Agent(
@@ -83,8 +82,8 @@ async def select_tools_with_adk(goal: str, settings: Settings) -> list[str]:
             selected = list(dict.fromkeys([*selected, *fallback]))
         return selected
     except Exception:
-        logger.exception("ADK tool selection failed; using local policy")
-        return fallback
+        logger.exception("ADK tool selection failed")
+        raise
 
 
 def build_adk_investigator_agent(settings: Settings):

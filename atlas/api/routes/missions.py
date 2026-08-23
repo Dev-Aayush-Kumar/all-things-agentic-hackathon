@@ -3,7 +3,13 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from atlas.api.dependencies import get_mission_service
-from atlas.domain.exceptions import DatasetNotFoundError, IdempotencyConflictError
+from atlas.domain.exceptions import (
+    CloudDispatchError,
+    CloudDispatchNotConfiguredError,
+    CloudPersistenceError,
+    DatasetNotFoundError,
+    IdempotencyConflictError,
+)
 from atlas.domain.models import (
     CreateMissionRequest,
     CreateMissionResponse,
@@ -43,6 +49,21 @@ async def create_mission(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
+        ) from exc
+    except CloudDispatchNotConfiguredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    except CloudDispatchError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    except CloudPersistenceError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Persistence unavailable",
         ) from exc
 
 

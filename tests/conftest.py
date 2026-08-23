@@ -11,6 +11,11 @@ from httpx import ASGITransport, AsyncClient
 
 # Force local fallback and fast execution before app import
 os.environ.setdefault("PLANNER_BACKEND", "local")
+os.environ.setdefault("ATLAS_RUNTIME_MODE", "local")
+os.environ.setdefault("ATLAS_PERSISTENCE", "sqlite")
+os.environ.setdefault("ATLAS_STORAGE", "local")
+os.environ.setdefault("ATLAS_DISPATCHER", "local")
+os.environ.setdefault("GEMINI_MODEL", "gemini-3.5-flash")
 os.environ.setdefault("ATLAS_STEP_DELAY_SECONDS", "0")
 os.environ.setdefault("ATLAS_EXECUTION_HEARTBEAT_SECONDS", "0.2")
 
@@ -18,6 +23,7 @@ from atlas.api.dependencies import (
     get_app_settings,
     get_dataset_service,
     get_mission_service,
+    get_mission_worker,
 )
 from atlas.config.settings import get_settings
 from atlas.main import create_app
@@ -33,6 +39,11 @@ def test_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
         db_path = Path(tmpdir) / "test_atlas.db"
         upload_dir = Path(tmpdir) / "uploads"
         monkeypatch.setenv("PLANNER_BACKEND", "local")
+        monkeypatch.setenv("ATLAS_RUNTIME_MODE", "local")
+        monkeypatch.setenv("ATLAS_PERSISTENCE", "sqlite")
+        monkeypatch.setenv("ATLAS_STORAGE", "local")
+        monkeypatch.setenv("ATLAS_DISPATCHER", "local")
+        monkeypatch.setenv("GEMINI_MODEL", "gemini-3.5-flash")
         monkeypatch.setenv("ATLAS_STEP_DELAY_SECONDS", "0")
         monkeypatch.setenv("ATLAS_EXECUTION_HEARTBEAT_SECONDS", "0.2")
         monkeypatch.setenv("GOOGLE_API_KEY", "")
@@ -43,11 +54,13 @@ def test_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
         get_app_settings.cache_clear()
         get_mission_service.cache_clear()
         get_dataset_service.cache_clear()
+        get_mission_worker.cache_clear()
         yield db_path
         get_settings.cache_clear()
         get_app_settings.cache_clear()
         get_mission_service.cache_clear()
         get_dataset_service.cache_clear()
+        get_mission_worker.cache_clear()
 
 
 @pytest.fixture
@@ -57,6 +70,7 @@ def app():
     get_app_settings.cache_clear()
     get_mission_service.cache_clear()
     get_dataset_service.cache_clear()
+    get_mission_worker.cache_clear()
     return create_app()
 
 

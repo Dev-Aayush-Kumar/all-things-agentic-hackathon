@@ -6,6 +6,8 @@ from pathlib import Path
 class LocalFileStorage:
     """Stores uploads under a configured directory using generated names."""
 
+    backend_name = "local_fs"
+
     def __init__(self, root: Path) -> None:
         self._root = root
 

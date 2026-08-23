@@ -6,7 +6,6 @@ from contextvars import ContextVar
 
 from atlas.agent.base import MissionPlanner
 from atlas.agent.factory import resolve_initial_tools
-from atlas.agent.loop import AgentLoop
 from atlas.agent.reasoner_base import InvestigationReasoner
 from atlas.agent.tools import ToolContext
 from atlas.config.settings import Settings
@@ -198,7 +197,9 @@ class MissionWorkflowRunner:
         selected_tools, plan_source = await resolve_initial_tools(
             mission.goal, self._settings
         )
-        loop = AgentLoop(
+        from atlas.ops.supervisor import Supervisor
+
+        supervisor = Supervisor(
             reasoner=self._reasoner,
             settings=self._settings,
             plan_source=plan_source,
@@ -215,7 +216,7 @@ class MissionWorkflowRunner:
             mission.touch()
             await self._persist(mission)
 
-        await loop.run(mission, context, persist)
+        await supervisor.run(mission, context, persist)
 
     async def _fail_mission(self, mission: Mission, error: str) -> None:
         mission.status = MissionStatus.FAILED

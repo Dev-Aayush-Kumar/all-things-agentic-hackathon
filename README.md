@@ -2,60 +2,151 @@
 
 **Autonomous Task & Lifecycle Agent System**
 
-ATLAS is an autonomous operations agent built for the Google All Things Agentic Hackathon 2026. Instead of requiring step-by-step instructions, ATLAS accepts a high-level goal and autonomously plans, executes, and reports on the work.
+ATLAS is an autonomous operations agent built for the Google All Things Agentic Hackathon 2026. It accepts a high-level goal, plans work, investigates uploaded CSV datasets with allowlisted tools, and produces an evidence-based report.
 
-> **Round 4 focus:** Durable asynchronous missions. The API submits and persists work. A worker claims a lease, runs the existing agent loop, and heartbeats. Interrupted executions can be recovered within attempt limits. This is still local SQLite + asyncio — not a Google Cloud deployment.
+Round 6 adds a **real multi-agent operations layer**: a supervisor delegates bounded work to DATA_ANALYST, INVESTIGATOR, and REPORTER specialists, observes evidence, and replans. Round 5's Google Cloud path and Gemini/ADK integration remain.
 
 ## Problem
 
-Traditional automation requires explicit scripts. A fixed investigation pipeline is only slightly better: it always runs the same six analyses regardless of the goal.
+Traditional automation requires explicit scripts. A fixed investigation pipeline is only slightly better: it always runs the same analyses regardless of the goal.
 
-ATLAS now inverts that model for dataset missions:
+ATLAS inverts that model for dataset missions:
 
 1. Upload a CSV dataset.
 2. Create a mission with a high-level investigation goal and `dataset_id`.
-3. The agent decides which capabilities are relevant, invokes them as tools, inspects structured evidence, and may add follow-up work based on what it actually found.
-4. Facts come from tools. Interpretation comes from the reasoner. Those layers stay separate.
+3. A supervisor decides which specialists should do which work, delegates tasks, inspects structured evidence, and may replan.
+4. Facts come from allowlisted tools. Interpretation comes from the reporter. Those layers stay separate.
 
 ## What makes ATLAS agentic
 
-ATLAS is agentic because it runs a bounded loop:
+ATLAS is agentic because a supervisor runs a bounded decision loop:
 
-**GOAL → UNDERSTAND → PLAN → SELECT WORK → USE TOOLS → OBSERVE RESULTS → REASON → DECIDE WHAT TO DO NEXT → COMPLETE**
+**MISSION → UNDERSTAND → DELEGATION PLAN → SPECIALISTS → TOOLS → EVIDENCE → OBSERVE → REPLAN / CONTINUE → SYNTHESIZE**
 
-That is not a collection of classes named "agent." The loop:
+That loop:
 
 - Interprets the mission goal.
-- Writes an inspectable structured plan (tools, task dependencies, status).
-- Invokes only allowlisted dataset tools.
+- Matches work to specialists through an in-process agent registry.
+- Delegates first-class tasks with dependencies, retries, and criticality.
+- Invokes only allowlisted dataset tools from the specialist that owns them.
 - Stores tool output as evidence.
-- Decides whether additional investigation is justified by that evidence.
-- Stops when the plan is done, a loop limit is reached, or a tool/agent failure occurs.
+- Changes subsequent work when evidence justifies it.
+- Stops when the plan is done, a loop limit is reached, or a critical specialist cannot finish.
 - Produces a final report that distinguishes observed facts from interpretation.
-
-> **Round 4 focus:** Durable asynchronous missions. The API submits and persists work. A worker claims a lease, runs the existing agent loop, and heartbeats. Interrupted executions can be recovered within attempt limits. This is still local SQLite + asyncio — not a Google Cloud deployment.
 
 ## Architecture
 
-```mermaid
-flowchart TD
-    Client[Client] -->|POST /missions| API[FastAPI]
-    API --> Service[Mission service]
-    Service --> SQLite[(SQLite: mission + lease + idempotency)]
-    Service -->|dispatch| Dispatcher[Dispatcher]
-    Dispatcher -->|local asyncio| Worker[Mission worker]
-    Dispatcher -.->|future| PubSub[Pub/Sub - not deployed]
-    Worker -->|claim lease| SQLite
-    Worker --> Workflow[Existing planner + agent loop]
-    Recover[Recovery service] -->|expired lease| SQLite
-    Recover -->|requeue| Dispatcher
+```
+User
+ ↓
+Mission API
+ ↓
+Durable Mission Worker
+ ↓
+Supervisor
+ ↓
+Delegation Manager
+ ↓
+Specialized Agents (DATA_ANALYST / INVESTIGATOR / REPORTER)
+ ↓
+Allowlisted Tools
+ ↓
+Evidence
+ ↓
+Supervisor Replanning
+ ↓
+Final Synthesis
 ```
 
-Local development uses `ATLAS_DISPATCHER=local`. A Pub/Sub dispatcher class exists only as an explicit stub; selecting it does not publish messages or require GCP.
+Cloud deployment still wraps this loop:
 
-### Mission lifecycle vs execution state
+```
+User → Cloud Run API → Firestore / Cloud Storage / Pub/Sub
+                 → Cloud Run Worker → Supervisor → Specialists → Report
+```
 
-Lifecycle (unchanged):
+The same codebase runs locally by swapping backends through environment variables.
+
+| Concern | LOCAL (default) | CLOUD |
+|---------|-----------------|-------|
+| Persistence | SQLite | Firestore |
+| Dataset bytes | Local filesystem | Cloud Storage |
+| Dispatch | In-process asyncio | Pub/Sub |
+| HTTP process | `atlas.main:app` | Cloud Run API (`atlas.main:app`) |
+| Worker | Same process as the API | Cloud Run worker (`atlas.worker:app`) |
+| Planner / reasoner | Deterministic local fallback unless Gemini credentials exist | Gemini via Google ADK |
+
+## Runtime modes
+
+### LOCAL
+
+Default developer experience. No Google Cloud credentials are required.
+
+- SQLite at `ATLAS_DATABASE_PATH`
+- CSV files under `ATLAS_UPLOAD_DIR`
+- Local asyncio dispatcher (the API process runs the worker)
+- If Gemini credentials are absent: `LOCAL_DEVELOPMENT_FALLBACK`
+- If `GOOGLE_API_KEY` or Vertex AI is configured: `REAL_GEMINI_ADK` still works locally
+
+### CLOUD
+
+Configured with `ATLAS_RUNTIME_MODE=cloud` (or explicit backend overrides).
+
+- Firestore for missions, events, plans, evidence, reports, and idempotency records
+- Cloud Storage for uploaded datasets
+- Pub/Sub for asynchronous dispatch
+- Cloud Run API publishes `{mission_id, source}` messages
+- Cloud Run worker receives the push, loads the durable mission from Firestore, claims a lease, and runs the supervisor / specialist loop
+
+Local developers are not forced to provision these resources. Cloud-specific unit tests use in-memory fakes.
+
+## Multi-agent operations
+
+The durable worker does not run a hardcoded `analyst → investigator → reporter` pipeline. A **supervisor** owns the mission:
+
+1. Understand the objective.
+2. Match work to specialists via the in-process **Agent Registry**.
+3. Create a persisted **delegation plan** of `SpecialistTask` objects (dependencies, criticality, retry limits).
+4. Delegate ready tasks through a **Delegation Manager** (local in-process today; the contract can later publish to Pub/Sub without changing the domain).
+5. Observe evidence.
+6. Replan when results justify more work.
+7. Ask the reporter to synthesize only after analysis work is complete enough.
+
+| Specialist | Responsibility | Tools |
+|------------|----------------|-------|
+| DATA_ANALYST | Profile and measure quality issues | Full investigation allowlist |
+| INVESTIGATOR | Connect findings and decide if more investigation is needed | `inspect_column` only |
+| REPORTER | Prioritize findings and write the final report | None (interpretation only) |
+
+Independent analyst measurements that only depend on the profile (for example missingness and duplicates) can run concurrently. A task does not start until its dependencies are `COMPLETED`.
+
+Adaptive example: a duplicates-only goal does **not** start with outlier analysis. If the profile shows an extreme numeric range, the supervisor then delegates outlier analysis. A clean numeric file with the same goal does not get that extra work.
+
+Delegation plans and specialist task states are stored on the mission document (SQLite JSON payload or Firestore). If a worker dies, recovery reclaims the mission lease and the supervisor resumes: `COMPLETED` specialist tasks are not rerun; `IN_PROGRESS` tasks return to `PENDING`.
+
+`GET /missions/{id}` exposes `delegation_plan`, `current_objective`, specialist task results, and the existing `agent_plan` / evidence / report fields. It does not expose secrets or filesystem paths.
+
+## Gemini / Google ADK
+
+Hackathon requirement: **Gemini 3.5 or newer**.
+
+- Model name is configured with `GEMINI_MODEL` (default `gemini-3.5-flash`).
+- ATLAS never silently replaces a configured model with an older one.
+- If the configured model is below 3.5, diagnostics set `gemini_meets_minimum=false` and a warning is logged. The exact name is still sent to the SDK.
+- When credentials exist, planning, initial tool selection, and finding interpretation use Google ADK (`REAL_GEMINI_ADK`).
+- Tool **execution** stays inside ATLAS. The model cannot run arbitrary tools, read files, or bypass the allowlist.
+- When credentials are missing, the local fallback is used and labeled `LOCAL_DEVELOPMENT_FALLBACK`. It is never labeled as Gemini.
+
+Transports:
+
+- Gemini API: `GOOGLE_API_KEY`
+- Vertex AI: `GOOGLE_GENAI_USE_VERTEXAI=true` and `GOOGLE_CLOUD_PROJECT`
+
+`GET /health` reports `planner_label`, `gemini_model`, and `gemini_transport`. It never includes API keys.
+
+## Mission lifecycle vs execution state
+
+Lifecycle:
 
 ```
 CREATED → PLANNING → EXECUTING → COMPLETED
@@ -70,69 +161,42 @@ QUEUED → CLAIMED → RUNNING → COMPLETED
                            └→ EXHAUSTED (max attempts after lease expiry)
 ```
 
-The API does not run the long-lived workflow inline. It persists the mission as `QUEUED` and dispatches. GET `/missions/{id}` includes `execution` metadata: state, attempt count, whether currently claimed, worker id while the lease is valid.
+The API persists the mission as `QUEUED` and dispatches. It does not run the long-lived workflow inline. `GET /missions/{id}` includes `execution` metadata: state, attempt count, whether currently claimed, worker id while the lease is valid.
 
 ### Claiming and leases
 
-A worker claims a mission with a SQLite `BEGIN IMMEDIATE` update. Only one worker can hold a valid lease. Updates from the workflow must present the same `execution_id` and `worker_id`; otherwise they fail as stale. Completed and failed missions cannot be claimed again.
-
-If the worker disappears, the lease expires. Another worker may claim the expired row, or recovery may requeue it.
+A worker claims a mission atomically (SQLite `BEGIN IMMEDIATE`, or a Firestore transaction). Only one worker can hold a valid lease. Workflow updates must present the same `execution_id` and `worker_id`. Completed and failed missions cannot be claimed again.
 
 ### Recovery
 
-`MissionRecoveryService.recover()` (also `POST /ops/recover-missions` for local/dev) finds incomplete missions whose leases have expired:
+`POST /ops/recover-missions` (local/dev convenience) finds incomplete missions whose leases have expired:
 
-- If attempts remain: clear the lease, mark `QUEUED`, emit `LEASE_EXPIRED` / `MISSION_RECOVERED`, dispatch again.
-- If `attempt_count >= max_attempts`: mark lifecycle `FAILED` and execution `EXHAUSTED`. Do not dispatch.
+- If attempts remain: clear the lease, mark `QUEUED`, dispatch again.
+- If `attempt_count >= max_attempts`: mark lifecycle `FAILED` and execution `EXHAUSTED`.
 - Never touches `COMPLETED` or `FAILED` missions.
 
-This is an explicit call, not a standing scheduler. Recovery re-dispatches the workflow from the start of planning; it does not checkpoint mid-agent-loop.
+Recovery re-dispatches the workflow from the start of planning; it does not checkpoint mid-agent-loop.
 
 ### Idempotency
 
-`POST /missions` accepts optional `idempotency_key` (max 128 characters). Scope is this local database:
+`POST /missions` accepts optional `idempotency_key` (max 128 characters):
 
 - Same key + same `{goal, dataset_id}` → return the existing mission (HTTP 202).
 - Same key + different payload → HTTP 409.
-- No key → previous create-always behavior.
+- No key → create a new mission.
 
-### Future Google Cloud path
+### Pub/Sub worker security
 
-The dispatcher interface is what Cloud Run workers plus Pub/Sub would replace. Firestore could later store the same lease columns. None of those services are provisioned or called in this round.
+A Pub/Sub message identifies a durable mission. It must not contain datasets, credentials, or secrets. The worker:
 
-Dataset missions run the agent loop during `EXECUTING`. Missions without a `dataset_id` keep the Round 1 generic lifecycle.
+1. Parses `mission_id`.
+2. Loads authoritative state from Firestore (or SQLite in local tests).
+3. Ignores missing, terminal, or exhausted missions.
+4. Claims the lease before executing.
 
-While the agent is working, the mission also exposes:
+Invalid push payloads return HTTP 400. Transient Firestore/Storage failures return HTTP 503 so Pub/Sub can retry with bounded backoff.
 
-- `current_phase` — UNDERSTANDING, PLANNING, TOOL_EXECUTION, OBSERVING, ADAPTING, REASONING, COMPLETING
-- `current_task` — active tool name
-- `agent_plan` — structured plan (objective, selected tools, tasks, status)
-- `tool_invocations` — tool activity
-- `evidence_records` — observed facts from tools
-- `interpretations` — reasoner text tied to evidence/finding ids
-- `events` — operational timeline
-- `investigation_report` — final structured result
-
-### Mission planning
-
-The plan is not a paragraph. It is a persisted `agent_plan` object:
-
-- `objective` — restated mission goal
-- `selected_tools` — capabilities the agent chose
-- `tasks` — ordered work items with `tool_name`, dependencies, arguments, status, and optional adaptive reason
-- `status` — `IN_PROGRESS`, `COMPLETED`, or `LIMIT_REACHED`
-- `iteration` / `tool_call_count` — loop progress
-
-The Round 1 `execution_plan` is projected from the agent plan so existing clients still see steps.
-
-Initial tool selection:
-
-- **Local mode:** deterministic policy over the goal text. Broad quality/investigation goals select the full quality set. Narrow goals (for example "check only for duplicate rows") select only the matching tools. `profile_dataset` is always first. `inspect_column` is never part of the initial plan.
-- **Gemini/ADK mode:** the model proposes tools from the same allowlist. Unknown tools are dropped. If the model returns only a profile, local policy tools are merged in. Tool *execution* still happens inside ATLAS, not as arbitrary model-side code.
-
-### Tool capabilities
-
-Investigation stages from Round 2 are now agent-callable tools bound to the mission dataset:
+## Investigation tools
 
 | Tool | What it measures |
 |------|------------------|
@@ -144,67 +208,22 @@ Investigation stages from Round 2 are now agent-callable tools bound to the miss
 | `analyze_consistency` | Explicit start≤end and non-negative quantity-like rules |
 | `inspect_column` | Follow-up on one named column already in the dataset |
 
-Tools return structured evidence (`observed_facts`, optional `findings`/`profile`). They do not interpret impact.
+Tools return structured evidence. They do not interpret impact. `inspect_column` is never part of the initial plan.
 
-### Adaptive execution
+Adaptive follow-up is evidence-driven (extreme numeric range → outliers; highly missing columns → inspect; type anomalies → inspect). These branches do not always fire.
 
-After each tool result, ATLAS evaluates whether extra work is justified by **that output**:
-
-1. If the profile shows an extreme numeric range (`max > 10 × median` with median > 0) and outliers were not planned, it adds `analyze_outliers`.
-2. If missing-value analysis finds a column ≥20% missing, it adds `inspect_column` for that column.
-3. If type/format analysis finds anomalies, it inspects the first affected column.
-
-These branches do not always fire. A clean numeric file with a duplicates-only goal does not trigger them. A survey file with an extreme `age` value does. Tests cover both sides.
-
-### Evidence vs reasoning
-
-| Layer | Responsibility |
-|-------|----------------|
-| **Tools** | Measure facts from the bound DataFrame |
-| **Evidence records** | Persist those facts with ids |
-| **Findings** | Structured quality issues, each with `evidence` and `detection_method` |
-| **Reasoner** | Summarize impact and recommend what to fix first |
-| **Interpretations** | Reasoner text linked to evidence/finding ids |
-
-The reasoner is not allowed to invent findings, metrics, or columns. Local fallback summaries are templates over measured findings. Gemini, when configured, receives the same measured artifacts.
-
-### Local fallback vs Gemini/ADK
-
-| Mode | When | What happens |
-|------|------|----------------|
-| `LOCAL_FALLBACK` | `PLANNER_BACKEND=local`, or `auto` without credentials | Policy selects tools. Template reasoner interprets findings. Source is labeled `LOCAL_FALLBACK`. |
-| `GEMINI_ADK` | Credentials present and backend is `auto` or `adk` | ADK/Gemini participates in planning, initial tool selection, and interpretation. Facts are still measured by Python tools. Source is labeled `GEMINI_ADK`. |
-
-Local execution is never labeled as Gemini. Tests force local mode and do not call paid APIs.
-
-### Safety boundaries
+## Safety boundaries
 
 Agent tools cannot:
 
 - run shell commands
 - evaluate arbitrary Python
-- read filesystem paths
+- read filesystem paths or GCS bucket paths chosen by the model
 - read environment secrets
 - inspect columns that are not in the mission dataset
 - accept arguments outside a per-tool allowlist
 
-The dataset is bound in-memory as `ToolContext`. Tools never receive upload paths. Loop limits cap iterations, tool calls, and runtime (`ATLAS_AGENT_MAX_ITERATIONS`, `ATLAS_AGENT_MAX_TOOL_CALLS`, `ATLAS_AGENT_MAX_RUNTIME_SECONDS`). Remaining planned tasks are marked `SKIPPED` if a limit is hit after a profile exists; otherwise the mission fails.
-
-### Observability
-
-Mission events reconstruct what ATLAS did, without chain-of-thought:
-
-- Mission received / understood
-- Plan created
-- Tool selected / started / completed / failed
-- Evidence received
-- Agent decision
-- Adaptive investigation triggered
-- Loop limit reached (when it happens)
-- Final reasoning completed
-- Mission completed
-
-Round 2 stage events (`DATASET_PROFILE_COMPLETED`, etc.) are still emitted when the corresponding tool finishes.
+The dataset is bound in-memory as `ToolContext`. Object names in Cloud Storage are generated basenames under a configured prefix. Loop limits cap iterations, tool calls, and runtime.
 
 ## Technology stack
 
@@ -212,26 +231,30 @@ Round 2 stage events (`DATASET_PROFILE_COMPLETED`, etc.) are still emitted when 
 - FastAPI
 - pandas (deterministic CSV investigation)
 - Google ADK + Gemini (when configured)
-- aiosqlite
+- aiosqlite (local)
+- google-cloud-firestore, google-cloud-storage, google-cloud-pubsub (cloud)
 - pytest + httpx
 
 ## Project structure
 
 ```
 atlas/
-├── api/routes/           # /health, /datasets, /missions
-├── agent/                # Loop, tools, policy, planner, reasoner (ADK / local)
+├── api/routes/           # /health, /ready, /datasets, /missions, Pub/Sub push
+├── agent/                # Tools, policy, planner, reasoner (ADK / local)
+├── ops/                  # Supervisor, registry, delegation, specialists
 ├── investigation/        # Deterministic CSV analyzers used by tools
-├── storage/              # Dataset byte storage (local; Cloud Storage later)
-├── persistence/          # SQLite mission + dataset metadata
+├── storage/              # Local filesystem or Cloud Storage
+├── persistence/          # SQLite or Firestore
+├── execution/            # Dispatcher, worker, Pub/Sub, recovery, leases
 ├── workflow/             # Mission lifecycle (generic + agent loop)
 ├── services/             # Mission and dataset business logic
 ├── domain/               # Models, enums, exceptions
-└── config/               # Environment settings
+├── config/               # Environment settings
+├── main.py               # API entrypoint
+└── worker.py             # Cloud Run worker entrypoint
 
-tests/
-├── fixtures/             # CSV fixtures with intentional quality issues
-└── test_*.py
+docs/CLOUD.md             # Cloud Run provisioning and deploy commands
+Dockerfile                # Single image for API and worker
 ```
 
 ## Environment setup
@@ -249,9 +272,11 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
+Do not commit `.env` or service-account JSON files. Cloud Run should use its service identity. Local cloud experiments should use Application Default Credentials (`gcloud auth application-default login`).
+
 ## Local development
 
-Default configuration uses the **local development fallback**. No Google credentials are required. Dataset investigation still runs against the real uploaded CSV.
+Default configuration uses SQLite, local files, and the local dispatcher. No Google credentials are required.
 
 ```bash
 uvicorn atlas.main:app --reload --host 0.0.0.0 --port 8000
@@ -259,13 +284,33 @@ uvicorn atlas.main:app --reload --host 0.0.0.0 --port 8000
 
 API docs: `http://localhost:8000/docs`
 
+Useful variables (see `.env.example` for the full set):
+
+```env
+ATLAS_RUNTIME_MODE=local
+PLANNER_BACKEND=auto
+GEMINI_MODEL=gemini-3.5-flash
+```
+
+To use real Gemini locally without Cloud backends:
+
+```env
+ATLAS_RUNTIME_MODE=local
+GOOGLE_API_KEY=your-api-key-here
+GEMINI_MODEL=gemini-3.5-flash
+PLANNER_BACKEND=auto
+```
+
 ## API usage
 
-**Health**
+**Health and readiness**
 
 ```bash
 curl http://localhost:8000/health
+curl http://localhost:8000/ready
 ```
+
+`/health` is healthy even when local fallback is active. `/ready` reports missing cloud configuration without calling Google APIs and without exposing secrets.
 
 **Upload a CSV**
 
@@ -274,32 +319,20 @@ curl -X POST http://localhost:8000/datasets \
   -F "file=@path/to/data.csv;type=text/csv"
 ```
 
-Returns `dataset_id`, original filename, generated stored filename, content type, size, and `created_at`. Filesystem paths are not exposed. Only CSV is accepted.
-
 **Create a dataset investigation mission**
 
 ```bash
 curl -X POST http://localhost:8000/missions \
   -H "Content-Type: application/json" \
-  -d "{\"goal\": \"Analyze this survey dataset, identify the most important quality problems, investigate what may be causing them, and tell me what should be fixed first.\", \"dataset_id\": \"YOUR_DATASET_ID\"}"
+  -d "{\"goal\": \"Analyze this survey dataset and identify the most important quality problems.\", \"dataset_id\": \"YOUR_DATASET_ID\"}"
 ```
 
-Returns immediately with HTTP 202. Unknown `dataset_id` values return 404. Optional `idempotency_key` makes retries safe.
+Returns HTTP 202. Unknown `dataset_id` values return 404. Optional `idempotency_key` makes retries safe. If Pub/Sub publish fails in cloud mode, the API returns 503; the mission remains `QUEUED` and is not pretended to have been dispatched.
 
 **Recover abandoned executions (local/dev)**
 
 ```bash
 curl -X POST http://localhost:8000/ops/recover-missions
-```
-
-Requeues missions with expired leases, within attempt limits. Not a production control plane.
-
-**Create a Round 1 mission (no dataset)**
-
-```bash
-curl -X POST http://localhost:8000/missions \
-  -H "Content-Type: application/json" \
-  -d "{\"goal\": \"Review system logs and summarize anomalies.\"}"
 ```
 
 **Retrieve mission + plan + report**
@@ -308,51 +341,57 @@ curl -X POST http://localhost:8000/missions \
 curl http://localhost:8000/missions/{mission_id}
 ```
 
-When a dataset mission completes, the payload includes `agent_plan`, `tool_invocations`, `evidence_records`, `interpretations`, `events`, `execution`, and `investigation_report`.
+## Cloud setup and deployment
 
-## Investigation measurements
+Implemented and documented. **Not claimed as already deployed** in a live project from this repository.
 
-Supported input: **CSV only**.
+See [docs/CLOUD.md](docs/CLOUD.md) for:
 
-Deterministic analyzers (invoked only when the agent selects them):
+- enabling APIs
+- creating Firestore, a Cloud Storage bucket, and a Pub/Sub topic
+- building the container
+- deploying `atlas-api` and `atlas-worker`
+- creating a push subscription
+- verifying `/health` and a sample mission
 
-1. **Dataset profile** — row/column counts, names, inferred types, numeric min/max/mean/median/std
-2. **Missing data** — per-column null counts and percentages; columns ≥20% missing are marked materially incomplete
-3. **Duplicates** — exact duplicate row count and percentage
-4. **Type / format anomalies** — values that fail numeric or datetime coercion; categorical casing/whitespace variants
-5. **Outliers** — Tukey IQR (1.5×) on numeric columns with enough values; skipped for binary or identifier-like columns
-6. **Cross-column consistency** — explicit rules only:
-   - start/begin vs end/finish datetime columns: start must be ≤ end
-   - columns named quantity/qty/count/age/price/amount/duration: values should not be negative
-7. **Prioritization** — deterministic rank (1 = highest) from affected-record percentage, category weight, and severity
-8. **Report** — structured JSON from measured findings plus reasoner interpretation
-
-ATLAS does **not** infer arbitrary semantic relationships between columns. If a consistency rule cannot be justified, it is not reported.
-
-## Gemini / ADK vs local fallback
-
-Set credentials in `.env` to use real Gemini via Google ADK for planning, initial tool selection, and finding interpretation:
+Minimum cloud environment:
 
 ```env
+ATLAS_RUNTIME_MODE=cloud
+ATLAS_RUNTIME_ROLE=api
+GOOGLE_CLOUD_PROJECT=your-gcp-project-id
+GOOGLE_CLOUD_LOCATION=us-central1
+ATLAS_GCS_BUCKET=your-atlas-datasets-bucket
+ATLAS_PUBSUB_TOPIC=atlas-missions
+GEMINI_MODEL=gemini-3.5-flash
+GOOGLE_GENAI_USE_VERTEXAI=true
 PLANNER_BACKEND=auto
-GOOGLE_API_KEY=your-api-key-here
-GEMINI_MODEL=gemini-2.5-flash
 ```
 
-Without credentials, or with `PLANNER_BACKEND=local`:
+Worker process:
 
-- `planner_source` / `reasoning_source` is `LOCAL_FALLBACK`
-- Tool selection and summaries are rule/template based
-- They are never labeled as Gemini output
-- CSV measurements still come from the real file
+```bash
+python -m uvicorn atlas.worker:app --host 0.0.0.0 --port ${PORT:-8080}
+```
+
+The worker does not run a local asyncio background task. Cloud Run invokes `POST /internal/pubsub/push`.
 
 ## Running tests
 
-Tests use the local fallback, a temp SQLite database, and a temp upload directory. No paid cloud resources are required.
+The default suite uses the local fallback, a temp SQLite database, temp uploads, and in-memory fakes for Firestore/GCS/Pub/Sub. It does not require Google credentials and does not call Google APIs.
 
 ```bash
 pytest -v
 ```
+
+Opt-in live Google Cloud checks (only if you have credentials and intend to use a real project):
+
+```bash
+# Windows PowerShell
+$env:ATLAS_LIVE_CLOUD="1"; pytest -v tests/integration
+```
+
+If that flag is unset, those tests are skipped.
 
 ## What is implemented
 
@@ -368,51 +407,68 @@ pytest -v
 - Missions that reference `dataset_id`
 - Real CSV investigation analyzers
 - Structured findings, deterministic prioritization, final report
-- Investigation-stage events
-- Parse/analysis failures → `FAILED` with error details
-- Round 1 missions without a dataset still work
 
 ### Round 3
 
 - Structured, persisted agent plan
 - Allowlisted investigation tools returning structured evidence
-- Goal-based tool selection (not a fixed six-stage pipeline)
-- Adaptive follow-up from actual tool output
+- Goal-based tool selection and adaptive follow-up
 - Evidence records distinct from reasoner interpretations
-- Operational agent events
 - Configurable loop limits
-- Local fallback remains fully testable; Gemini/ADK path remains wired
 
 ### Round 4
 
-- Mission submission is separate from worker execution
-- Durable SQLite execution metadata and exclusive leases
-- Local dispatcher with a replaceable (unimplemented) Pub/Sub stub
+- Mission submission separated from worker execution
+- Durable execution metadata and exclusive leases
+- Local dispatcher
 - Bounded recovery of expired leases
-- Optional idempotency keys on mission create
-- Operational events: queued, claimed, lease expired, recovered, attempt failed, exhausted
+- Optional idempotency keys
+
+### Round 5
+
+- Runtime mode configuration (`local` vs `cloud`)
+- Real Gemini 3.5+ via Google ADK, with `GEMINI_MODEL` configuration
+- Explicit `REAL_GEMINI_ADK` vs `LOCAL_DEVELOPMENT_FALLBACK` diagnostics
+- Real Firestore mission/dataset repository (tested against an in-memory store)
+- Real Cloud Storage dataset backend (tested with a fake client)
+- Real Pub/Sub dispatcher and Cloud Run worker push entrypoint
+- Dockerfile and Cloud Run deploy documentation
+- Health/readiness reporting of active backends without secrets
+
+### Round 6
+
+- Supervisor / orchestrator owns the mission decision loop
+- In-process Agent Registry with DATA_ANALYST, INVESTIGATOR, and REPORTER
+- Persisted specialist tasks with dependencies, retries, and criticality
+- Concurrent execution of independent analyst work
+- Evidence-driven replanning (not a fixed three-agent pipeline)
+- Mission recovery resumes from completed specialist tasks
+- `GET /missions/{id}` exposes delegation plan and specialist task state
+
+## Optional / future
+
+These are **not** implemented in this round:
+
+- A provisioned live GCP project, bucket, topic, or Cloud Run service from this repo
+- Authentication / IAM beyond Cloud Run service identity
+- Frontend UI
+- Distributed agent registry, Memory Bank, Model Armor
+- Multi-region deployment, GKE, or extra microservices
+- Standing recovery scheduler (recovery remains an explicit call)
+- Perfect mid-tool checkpointing (completed specialist tasks are skipped; in-flight tools restart)
+- File types other than CSV
 
 ## Known limitations
 
 - CSV only (no XLSX, PDF, or other formats)
-- Consistency checks are a small explicit rule set, not general semantic understanding
+- Consistency checks are a small explicit rule set
 - Adaptive branches are a defined evidence-driven policy, not an unbounded model-authored workflow
-- When Gemini is configured, it selects initial tools and interprets findings; tool execution stays inside ATLAS so evidence and limits remain controlled
-- Step execution for missions *without* a dataset is still a lifecycle demonstration, not domain work
-- Local filesystem + SQLite (not Cloud Storage / Firestore)
-- Local asyncio dispatch (Pub/Sub and Cloud Run are not deployed)
-- Recovery is on-demand, not a standing scheduler, and restarts the workflow rather than resuming mid-loop
-- No frontend, authentication, or production deployment
-- This repo's tests always use the local fallback
-
-## Planned for later rounds
-
-- Frontend UI
-- Firestore and Cloud Storage
-- Pub/Sub and Cloud Run
-- Specialized agents and persistent memory
-- Additional file types
-- Authentication and production security
+- When Gemini is configured, it participates in initial capability selection and final interpretation; tool execution stays inside ATLAS
+- Step execution for missions *without* a dataset is still a lifecycle demonstration, not specialist delegation
+- Recovery is on-demand. Completed specialist tasks are not rerun; a tool that died mid-call is retried
+- Delegation is in-process in the mission worker (local asyncio or the Cloud Run worker). There is no separate specialist fleet
+- Default tests always force local fallback and do not call paid APIs
+- Live Google Cloud verification depends on credentials in the environment running the tests
 
 ## License
 

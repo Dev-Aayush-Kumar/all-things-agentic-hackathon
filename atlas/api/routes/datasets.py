@@ -3,7 +3,12 @@
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 
 from atlas.api.dependencies import get_dataset_service
-from atlas.domain.exceptions import DatasetNotFoundError, DatasetValidationError
+from atlas.domain.exceptions import (
+    CloudPersistenceError,
+    CloudStorageError,
+    DatasetNotFoundError,
+    DatasetValidationError,
+)
 from atlas.domain.models import DatasetUploadResponse
 from atlas.services.dataset_service import DatasetService
 
@@ -27,6 +32,16 @@ async def upload_dataset(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
+        ) from exc
+    except CloudStorageError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Storage unavailable",
+        ) from exc
+    except CloudPersistenceError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Persistence unavailable",
         ) from exc
 
 

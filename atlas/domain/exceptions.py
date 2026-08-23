@@ -43,8 +43,29 @@ class StaleExecutionError(Exception):
         super().__init__(message or f"Execution lease for mission '{mission_id}' is no longer valid")
 
 
+class CloudPersistenceError(Exception):
+    """Raised when a cloud persistence backend fails."""
+
+
+class CloudStorageError(Exception):
+    """Raised when Cloud Storage (or the configured object store) fails."""
+
+
+class CloudDispatchError(Exception):
+    """Raised when publishing a mission for execution fails."""
+
+
 class CloudDispatchNotConfiguredError(Exception):
-    """Raised when a cloud dispatcher is selected but not implemented/configured."""
+    """Raised when Pub/Sub dispatch is selected but not configured."""
 
     def __init__(self, message: str) -> None:
         super().__init__(message)
+
+
+class MissionNotExecutableError(Exception):
+    """Raised when a worker message refers to a mission that cannot be run."""
+
+    def __init__(self, mission_id: str, reason: str) -> None:
+        self.mission_id = mission_id
+        self.reason = reason
+        super().__init__(f"Mission '{mission_id}' is not executable: {reason}")
