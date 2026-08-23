@@ -60,6 +60,14 @@ class Settings(BaseSettings):
         default=Path("data/atlas.db"), alias="ATLAS_DATABASE_PATH"
     )
 
+    # Dataset uploads (local filesystem; replaceable with Cloud Storage)
+    upload_dir: Path = Field(
+        default=Path("data/uploads"), alias="ATLAS_UPLOAD_DIR"
+    )
+    upload_max_bytes: int = Field(
+        default=10 * 1024 * 1024, alias="ATLAS_UPLOAD_MAX_BYTES"
+    )
+
     # Workflow timing (local dev / tests)
     step_execution_delay_seconds: float = Field(
         default=0.05, alias="ATLAS_STEP_DELAY_SECONDS"

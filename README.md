@@ -2,120 +2,101 @@
 
 **Autonomous Task & Lifecycle Agent System**
 
-ATLAS is an autonomous operations agent built for the [Google All Things Agentic Hackathon 2026](https://google.github.io/adk-docs/). Instead of requiring step-by-step instructions, ATLAS accepts a high-level goal and autonomously plans, executes, and reports on the work.
+ATLAS is an autonomous operations agent built for the Google All Things Agentic Hackathon 2026. Instead of requiring step-by-step instructions, ATLAS accepts a high-level goal and autonomously plans, executes, and reports on the work.
 
-> **Round 1 focus:** Prove the core autonomous mission lifecycle with a working vertical slice — create a mission, plan it, execute it in the background, persist state, and query progress at any time.
+> **Round 2 focus:** Perform a real autonomous CSV data investigation. Deterministic Python measures facts from the uploaded file. The planner/reasoner interprets those facts against the user's goal. Findings are never canned or simulated.
 
 ## Problem
 
-Traditional automation requires explicit scripts and detailed instructions. ATLAS inverts that model: you describe *what* needs to happen, and the agent determines *how* to do it.
+Traditional automation requires explicit scripts. ATLAS inverts that model: you describe *what* needs to happen, and the agent determines *how* to do it.
 
-Example goal:
+Round 2 target:
 
-```json
-{
-  "goal": "Analyze the provided dataset and identify the major inconsistencies."
-}
-```
+1. Upload a CSV dataset.
+2. Create a mission with a high-level investigation goal and `dataset_id`.
+3. ATLAS inspects the real file, measures quality issues, prioritizes them, and returns a structured report.
 
-ATLAS will interpret the goal, generate a structured execution plan, run the plan asynchronously, record events, and reach a terminal state (`COMPLETED` or `FAILED`).
-
-## Round 1 Architecture
+## Architecture
 
 ```
-┌─────────────┐     POST /missions      ┌──────────────────┐
-│   Client    │ ──────────────────────► │   FastAPI API    │
-└─────────────┘                         └────────┬─────────┘
-       ▲                                         │
-       │ GET /missions/{id}                      │ returns immediately (202)
-       │                                         ▼
-       │                                ┌──────────────────┐
-       └────────────────────────────────│  Mission Service │
-                                        └────────┬─────────┘
-                                                 │
-                    ┌────────────────────────────┼────────────────────────────┐
-                    ▼                            ▼                            ▼
-           ┌──────────────┐            ┌─────────────────┐           ┌─────────────────┐
-           │  Repository  │            │ Background Exec │           │ Mission Planner │
-           │   (SQLite)   │            │   (asyncio)     │           │ ADK / Local FB  │
-           └──────────────┘            └────────┬────────┘           └─────────────────┘
-                                                │
-                                                ▼
-                                       ┌─────────────────┐
-                                       │ Workflow Runner │
-                                       │ Plan → Execute  │
-                                       └─────────────────┘
+┌─────────────┐   POST /datasets     ┌──────────────────┐
+│   Client    │ ───────────────────► │   FastAPI API    │
+│             │   POST /missions     └────────┬─────────┘
+└─────────────┘                               │ 202 immediately
+       ▲                                      ▼
+       │ GET /missions/{id}          ┌──────────────────┐
+       └─────────────────────────────│  Mission Service │
+                                     └────────┬─────────┘
+          ┌──────────────┬────────────────────┼─────────────────┐
+          ▼              ▼                    ▼                 ▼
+   Dataset store   SQLite metadata    Background exec     Planner / reasoner
+   (local files)   (missions+datasets)   (asyncio)        (ADK or local)
+                                              │
+                                              ▼
+                                   Workflow: plan → execute
+                                   Dataset missions run the
+                                   investigation pipeline
 ```
 
-### Mission Lifecycle
+### Mission lifecycle
 
 ```
 CREATED → PLANNING → EXECUTING → COMPLETED
                               └→ FAILED
 ```
 
-### Key Design Decisions
+Dataset missions add investigation stages during `EXECUTING`. Missions without a `dataset_id` keep the Round 1 generic lifecycle.
 
-| Layer | Round 1 | Future |
+### Facts vs reasoning
+
+| Layer | Responsibility |
+|-------|----------------|
+| **Deterministic pipeline** | Profile, missing values, duplicates, type/format anomalies, IQR outliers, explicit consistency rules |
+| **Planner** | Turn the goal into a structured execution plan |
+| **Reasoner** | Summarize measured findings, explain impact, organize a resolution plan |
+
+The reasoner is not allowed to invent findings, metrics, or columns.
+
+### Replaceable infrastructure
+
+| Layer | Round 2 | Later |
 |-------|---------|--------|
-| **API** | FastAPI | Same |
-| **Planner** | Gemini ADK or local fallback | Multi-agent delegation |
-| **Execution** | Local asyncio background tasks | Cloud Pub/Sub |
-| **Persistence** | SQLite | Firestore |
-| **Deployment** | Local | Cloud Run |
+| Dataset bytes | Local filesystem (`data/uploads`) | Cloud Storage |
+| Metadata | SQLite | Firestore |
+| Background work | asyncio tasks | Pub/Sub |
+| Planner / reasoner | Gemini ADK or local fallback | Multi-agent fleet |
 
-## Technology Stack
+## Technology stack
 
-- **Python 3.10+**
-- **FastAPI** — HTTP API
-- **Google ADK** — Agent framework (when configured)
-- **Gemini** — Planning model (when configured)
-- **aiosqlite** — Local persistence
-- **pytest + httpx** — Automated tests
+- Python 3.10+
+- FastAPI
+- pandas (deterministic CSV investigation)
+- Google ADK + Gemini (when configured)
+- aiosqlite
+- pytest + httpx
 
-## Project Structure
+## Project structure
 
 ```
 atlas/
-├── main.py                 # FastAPI application entry point
-├── api/
-│   ├── dependencies.py     # Dependency injection
-│   └── routes/             # HTTP route handlers
-├── config/
-│   └── settings.py         # Environment-based configuration
-├── domain/
-│   ├── enums.py            # MissionStatus, EventType, etc.
-│   └── models.py           # Pydantic domain models
-├── agent/
-│   ├── adk_planner.py      # Real Gemini/ADK planner
-│   ├── local_planner.py    # Local development fallback
-│   └── factory.py          # Planner selection
-├── workflow/
-│   ├── mission_runner.py   # Full mission lifecycle orchestration
-│   └── step_executor.py    # Individual step execution
-├── persistence/
-│   ├── sqlite_repository.py
-│   └── factory.py
-├── execution/
-│   ├── local_executor.py   # Background task dispatch
-│   └── factory.py
-└── services/
-    └── mission_service.py  # Business logic
+├── api/routes/           # /health, /datasets, /missions
+├── agent/                # Planner + investigation reasoner (ADK / local)
+├── investigation/        # Deterministic CSV analysis pipeline
+├── storage/              # Dataset byte storage (local; Cloud Storage later)
+├── persistence/          # SQLite mission + dataset metadata
+├── workflow/             # Mission lifecycle (generic + dataset investigation)
+├── services/             # Mission and dataset business logic
+├── domain/               # Models, enums, exceptions
+└── config/               # Environment settings
 
-tests/                      # Automated test suite
+tests/
+├── fixtures/             # CSV fixtures with intentional quality issues
+└── test_*.py
 ```
 
-## Environment Setup
-
-### Prerequisites
-
-- Python 3.10 or newer
-- pip
-
-### Installation
+## Environment setup
 
 ```bash
-# Create and activate a virtual environment
 python -m venv .venv
 
 # Windows
@@ -124,57 +105,91 @@ python -m venv .venv
 # macOS/Linux
 source .venv/bin/activate
 
-# Install dependencies
 pip install -r requirements.txt
-
-# Copy environment template
 cp .env.example .env
 ```
 
-## Local Development
+## Local development
 
-By default, ATLAS runs without any Google Cloud credentials using the **local development fallback planner**. This produces real structured plans and executes them — it just does not call Gemini.
+Default configuration uses the **local development fallback** planner/reasoner. No Google credentials are required. Dataset investigation still runs against the real uploaded CSV.
 
 ```bash
-# Start the server
 uvicorn atlas.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### API Examples
+API docs: `http://localhost:8000/docs`
 
-**Health check:**
+## API usage
+
+**Health**
 
 ```bash
 curl http://localhost:8000/health
 ```
 
-**Create a mission:**
+**Upload a CSV**
+
+```bash
+curl -X POST http://localhost:8000/datasets \
+  -F "file=@path/to/data.csv;type=text/csv"
+```
+
+Returns `dataset_id`, original filename, generated stored filename, content type, size, and `created_at`. Filesystem paths are not exposed. Only CSV is accepted. Empty files, unsupported types, and oversized uploads are rejected. Stored names are generated UUIDs; original names are sanitized.
+
+**Create a dataset investigation mission**
 
 ```bash
 curl -X POST http://localhost:8000/missions \
   -H "Content-Type: application/json" \
-  -d '{"goal": "Analyze the provided dataset and identify the major inconsistencies."}'
+  -d "{\"goal\": \"Analyze this dataset, identify important data quality problems and inconsistencies, investigate likely causes, prioritize the issues, and produce a concrete resolution plan.\", \"dataset_id\": \"YOUR_DATASET_ID\"}"
 ```
 
-**Check mission status:**
+Returns immediately with HTTP 202. Unknown `dataset_id` values return 404.
+
+**Create a Round 1 mission (no dataset)**
+
+```bash
+curl -X POST http://localhost:8000/missions \
+  -H "Content-Type: application/json" \
+  -d "{\"goal\": \"Review system logs and summarize anomalies.\"}"
+```
+
+**Retrieve mission + report**
 
 ```bash
 curl http://localhost:8000/missions/{mission_id}
 ```
 
-Interactive API docs are available at `http://localhost:8000/docs`.
+When a dataset mission completes, the payload includes `investigation_report` with dataset summary, prioritized findings (evidence + metrics), recommended actions, and overall assessment.
 
-## Running Tests
-
-Tests use the local fallback planner and an isolated SQLite database. No paid cloud resources are required.
+**Retrieve dataset metadata**
 
 ```bash
-pytest -v
+curl http://localhost:8000/datasets/{dataset_id}
 ```
 
-## Real Gemini / ADK Configuration
+## Investigation capabilities (Round 2)
 
-To use the real Gemini planner via Google ADK, set credentials in `.env`:
+Supported input: **CSV only**.
+
+Stages (each recorded as a mission event):
+
+1. **Dataset profile** — row/column counts, names, inferred types, numeric min/max/mean/median/std
+2. **Missing data** — per-column null counts and percentages; columns ≥20% missing are marked materially incomplete
+3. **Duplicates** — exact duplicate row count and percentage
+4. **Type / format anomalies** — values that fail numeric or datetime coercion; categorical casing/whitespace variants
+5. **Outliers** — Tukey IQR (1.5×) on numeric columns with enough values; skipped for binary or identifier-like columns
+6. **Cross-column consistency** — explicit rules only:
+   - start/begin vs end/finish datetime columns: start must be ≤ end
+   - columns named quantity/qty/count/age/price/amount/duration: values should not be negative
+7. **Prioritization** — deterministic rank (1 = highest) from affected-record percentage, category weight, and severity
+8. **Report** — structured JSON from measured findings plus reasoner interpretation
+
+ATLAS does **not** infer arbitrary semantic relationships between columns. If a consistency rule cannot be justified, it is not reported.
+
+## Gemini / ADK vs local fallback
+
+Set credentials in `.env` to use real Gemini via Google ADK for planning and finding interpretation:
 
 ```env
 PLANNER_BACKEND=auto
@@ -182,64 +197,57 @@ GOOGLE_API_KEY=your-api-key-here
 GEMINI_MODEL=gemini-2.5-flash
 ```
 
-For Vertex AI:
+Without credentials, or with `PLANNER_BACKEND=local`:
 
-```env
-PLANNER_BACKEND=adk
-GOOGLE_GENAI_USE_VERTEXAI=true
-GOOGLE_CLOUD_PROJECT=your-gcp-project-id
-GOOGLE_CLOUD_LOCATION=us-central1
-GEMINI_MODEL=gemini-2.5-flash
+- `planner_source` / `reasoning_source` is `LOCAL_FALLBACK`
+- Plans and summaries are rule/template based
+- They are never labeled as Gemini output
+- CSV measurements still come from the real file
+
+## Running tests
+
+Tests use the local fallback, a temp SQLite database, and a temp upload directory. No paid cloud resources are required.
+
+```bash
+pytest -v
 ```
 
-When credentials are present, the health endpoint reports:
+## What is implemented
 
-```json
-{
-  "planner_backend": "adk",
-  "adk_configured": true
-}
-```
+### Round 1
 
-## Local Fallback Behavior
+- FastAPI health and mission endpoints
+- Async mission lifecycle with persisted state and events
+- Planner abstraction (Gemini ADK or local fallback)
 
-When no credentials are configured (or `PLANNER_BACKEND=local`), ATLAS uses `LocalFallbackPlanner`:
+### Round 2
 
-- Clearly labeled with `planner_source: "LOCAL_FALLBACK"`
-- Produces deterministic, rule-based execution plans
-- Never masquerades as Gemini output
-- Fully runnable for development and CI
+- CSV dataset upload with validation and safe storage names
+- Missions that reference `dataset_id`
+- Real CSV investigation pipeline
+- Structured findings, deterministic prioritization, final report
+- Investigation-stage events
+- Parse/analysis failures → `FAILED` with error details
+- Round 1 missions without a dataset still work
 
-Force local fallback even with credentials present:
+## Known limitations
 
-```env
-PLANNER_BACKEND=local
-```
+- CSV only (no XLSX, PDF, or other formats)
+- Consistency checks are a small explicit rule set, not general semantic understanding
+- Step execution for missions *without* a dataset is still a lifecycle demonstration, not domain work
+- Local filesystem + SQLite (not Cloud Storage / Firestore yet)
+- Local asyncio background tasks (not Pub/Sub)
+- No frontend, authentication, or production deployment
+- Gemini/ADK interpretation is used only when credentials are configured; this repo's tests always use the local fallback
 
-## What Is Implemented (Round 1)
-
-- [x] FastAPI backend with health and mission endpoints
-- [x] Mission creation with immediate async return (HTTP 202)
-- [x] Background workflow execution via asyncio
-- [x] Structured execution plan generation
-- [x] Step-by-step plan execution with state updates
-- [x] Event recording throughout the lifecycle
-- [x] SQLite persistence with repository abstraction
-- [x] Gemini/ADK planner integration (when configured)
-- [x] Clearly separated local development fallback
-- [x] Automated test suite covering the full lifecycle
-
-## Planned for Later Rounds
+## Planned for later rounds
 
 - Frontend UI
-- Firestore persistence
-- Cloud Pub/Sub for distributed execution
-- Cloud Run deployment
+- Firestore and Cloud Storage
+- Pub/Sub and Cloud Run
 - Multi-agent delegation
-- File/dataset upload and analysis
-- Memory bank and long-running workflows
+- Additional file types
 - Authentication and production security
-- Advanced failure recovery and retry
 
 ## License
 

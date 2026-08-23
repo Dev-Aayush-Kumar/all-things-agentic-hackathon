@@ -8,8 +8,10 @@ from pydantic import BaseModel, Field
 
 from atlas.domain.enums import (
     EventType,
+    FindingCategory,
     MissionStatus,
     PlannerSource,
+    Severity,
     StepStatus,
 )
 
@@ -38,6 +40,118 @@ class ExecutionPlan(BaseModel):
     summary: str | None = None
 
 
+class NumericStats(BaseModel):
+    """Basic statistics for a numeric column."""
+
+    min: float
+    max: float
+    mean: float
+    median: float
+    std: float | None = None
+
+
+class ColumnProfile(BaseModel):
+    """Profile of a single dataset column."""
+
+    name: str
+    inferred_type: str
+    non_null_count: int
+    null_count: int
+    null_percent: float
+    unique_count: int
+    numeric_stats: NumericStats | None = None
+
+
+class DatasetProfile(BaseModel):
+    """Deterministic profile of an inspected CSV."""
+
+    row_count: int
+    column_count: int
+    columns: list[ColumnProfile]
+
+
+class Finding(BaseModel):
+    """A structured, evidence-based investigation finding."""
+
+    finding_id: str
+    category: FindingCategory
+    title: str
+    description: str
+    affected_columns: list[str] = Field(default_factory=list)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    affected_row_count: int | None = None
+    affected_row_percent: float | None = None
+    severity: Severity
+    priority: int = 0
+    suggested_action: str
+    detection_method: str
+
+
+class RecommendedAction(BaseModel):
+    """A recommended remediation action derived from findings."""
+
+    action_id: str
+    title: str
+    description: str
+    related_finding_ids: list[str] = Field(default_factory=list)
+    priority: int = 0
+
+
+class DatasetSummary(BaseModel):
+    """Dataset snapshot included in the investigation report."""
+
+    dataset_id: str | None = None
+    original_filename: str | None = None
+    row_count: int
+    column_count: int
+    columns: list[ColumnProfile]
+
+
+class InvestigationReport(BaseModel):
+    """Structured final report for a dataset investigation mission."""
+
+    mission_summary: str
+    dataset_summary: DatasetSummary
+    investigation_summary: str
+    findings: list[Finding]
+    recommended_actions: list[RecommendedAction]
+    overall_assessment: str
+    reasoning_source: PlannerSource
+
+
+class DatasetRecord(BaseModel):
+    """Persisted metadata for an uploaded dataset."""
+
+    dataset_id: str = Field(default_factory=lambda: str(uuid4()))
+    original_filename: str
+    stored_filename: str
+    content_type: str
+    size_bytes: int
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class DatasetUploadResponse(BaseModel):
+    """Response after a successful dataset upload."""
+
+    dataset_id: str
+    original_filename: str
+    stored_filename: str
+    content_type: str
+    size_bytes: int
+    created_at: datetime
+
+    @classmethod
+    def from_record(cls, record: DatasetRecord) -> "DatasetUploadResponse":
+        return cls(
+            dataset_id=record.dataset_id,
+            original_filename=record.original_filename,
+            stored_filename=record.stored_filename,
+            content_type=record.content_type,
+            size_bytes=record.size_bytes,
+            created_at=record.created_at,
+        )
+
+
 class MissionEvent(BaseModel):
     """An event recorded during mission execution."""
 
@@ -53,8 +167,10 @@ class Mission(BaseModel):
 
     mission_id: str = Field(default_factory=lambda: str(uuid4()))
     goal: str
+    dataset_id: str | None = None
     status: MissionStatus = MissionStatus.CREATED
     execution_plan: ExecutionPlan | None = None
+    investigation_report: InvestigationReport | None = None
     events: list[MissionEvent] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -70,6 +186,7 @@ class CreateMissionRequest(BaseModel):
     """Request body for creating a mission."""
 
     goal: str
+    dataset_id: str | None = None
 
 
 class CreateMissionResponse(BaseModel):
@@ -78,6 +195,7 @@ class CreateMissionResponse(BaseModel):
     mission_id: str
     status: MissionStatus
     created_at: datetime
+    dataset_id: str | None = None
 
 
 class MissionDetailResponse(BaseModel):
@@ -85,8 +203,10 @@ class MissionDetailResponse(BaseModel):
 
     mission_id: str
     goal: str
+    dataset_id: str | None = None
     status: MissionStatus
     execution_plan: ExecutionPlan | None
+    investigation_report: InvestigationReport | None = None
     events: list[MissionEvent]
     created_at: datetime
     updated_at: datetime
@@ -99,8 +219,10 @@ class MissionDetailResponse(BaseModel):
         return cls(
             mission_id=mission.mission_id,
             goal=mission.goal,
+            dataset_id=mission.dataset_id,
             status=mission.status,
             execution_plan=mission.execution_plan,
+            investigation_report=mission.investigation_report,
             events=mission.events,
             created_at=mission.created_at,
             updated_at=mission.updated_at,

@@ -51,12 +51,12 @@ class AdkMissionPlanner(MissionPlanner):
     def source_name(self) -> str:
         return "GEMINI_ADK"
 
-    async def create_plan(self, goal: str) -> ExecutionPlan:
+    async def create_plan(self, goal: str, dataset_id: str | None = None) -> ExecutionPlan:
         """Generate a plan using Google ADK."""
-        raw_response = await self._invoke_adk(goal)
+        raw_response = await self._invoke_adk(goal, dataset_id)
         return self._parse_plan(raw_response, goal)
 
-    async def _invoke_adk(self, goal: str) -> str:
+    async def _invoke_adk(self, goal: str, dataset_id: str | None = None) -> str:
         """Call Google ADK agent and return raw text response."""
         try:
             from google.adk import Agent
@@ -78,8 +78,15 @@ class AdkMissionPlanner(MissionPlanner):
 
         prompt = (
             f"Create an execution plan for this mission goal:\n\n{goal}\n\n"
-            "Respond with JSON only."
         )
+        if dataset_id:
+            prompt += (
+                "A CSV dataset is attached. Include investigation stages such as "
+                "profiling, missing data, duplicates, type/format anomalies, "
+                "outliers, consistency checks, prioritization, and a final report. "
+                "Do not invent data measurements in the plan; measurements happen later.\n\n"
+            )
+        prompt += "Respond with JSON only."
 
         events = await runner.run_debug(
             prompt,

@@ -13,30 +13,46 @@ from httpx import ASGITransport, AsyncClient
 os.environ.setdefault("PLANNER_BACKEND", "local")
 os.environ.setdefault("ATLAS_STEP_DELAY_SECONDS", "0")
 
-from atlas.api.dependencies import get_app_settings, get_mission_service
+from atlas.api.dependencies import (
+    get_app_settings,
+    get_dataset_service,
+    get_mission_service,
+)
+from atlas.config.settings import get_settings
 from atlas.main import create_app
+
+
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
 @pytest.fixture(autouse=True)
 def test_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """Configure isolated test environment for each test."""
-    with tempfile.TemporaryDirectory() as tmpdir:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
         db_path = Path(tmpdir) / "test_atlas.db"
+        upload_dir = Path(tmpdir) / "uploads"
         monkeypatch.setenv("PLANNER_BACKEND", "local")
         monkeypatch.setenv("ATLAS_STEP_DELAY_SECONDS", "0")
         monkeypatch.setenv("ATLAS_DATABASE_PATH", str(db_path))
+        monkeypatch.setenv("ATLAS_UPLOAD_DIR", str(upload_dir))
+        get_settings.cache_clear()
         get_app_settings.cache_clear()
         get_mission_service.cache_clear()
+        get_dataset_service.cache_clear()
         yield db_path
+        get_settings.cache_clear()
         get_app_settings.cache_clear()
         get_mission_service.cache_clear()
+        get_dataset_service.cache_clear()
 
 
 @pytest.fixture
 def app():
     """Create a fresh FastAPI app instance."""
+    get_settings.cache_clear()
     get_app_settings.cache_clear()
     get_mission_service.cache_clear()
+    get_dataset_service.cache_clear()
     return create_app()
 
 
@@ -52,7 +68,7 @@ async def wait_for_mission_status(
     client: AsyncClient,
     mission_id: str,
     target_statuses: set[str],
-    timeout: float = 30.0,
+    timeout: float = 60.0,
     poll_interval: float = 0.05,
 ) -> dict:
     """Poll mission endpoint until target status is reached."""

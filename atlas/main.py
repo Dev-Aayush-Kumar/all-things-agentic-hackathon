@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from atlas import __version__
-from atlas.api.routes import health, missions
+from atlas.api.routes import datasets, health, missions
 from atlas.config.settings import get_settings
 
 logging.basicConfig(
@@ -42,6 +42,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.include_router(health.router)
+    app.include_router(datasets.router)
     app.include_router(missions.router)
     return app
 

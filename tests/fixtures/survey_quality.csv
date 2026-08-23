@@ -1,0 +1,12 @@
+respondent_id,age,income,status,quantity,start_date,end_date,region,score
+1,25,50000,active,10,2024-01-01,2024-01-15,North,80
+2,30,60000,Active,5,2024-02-01,2024-02-10,north,85
+3,,55000,inactive,8,2024-03-01,2024-03-20,South,90
+4,40,not_a_number,ACTIVE,12,2024-04-01,2024-04-05,East,88
+5,35,70000,active,-3,2024-05-01,2024-04-01,West,92
+6,28,65000,pending,7,invalid-date,2024-06-10,North,75
+7,1500,80000,active,9,2024-07-01,2024-07-15,South,95
+8,32,72000,active,11,2024-08-01,2024-08-20,East,82
+8,32,72000,active,11,2024-08-01,2024-08-20,East,82
+9,29,58000,  active ,6,2024-09-01,2024-09-12,West,70
+10,45,,inactive,4,2024-10-01,2024-10-15,North,

@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from atlas.api.dependencies import get_mission_service
+from atlas.domain.exceptions import DatasetNotFoundError
 from atlas.domain.models import (
     CreateMissionRequest,
     CreateMissionResponse,
@@ -29,7 +30,13 @@ async def create_mission(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="goal must be a non-empty string",
         )
-    return await service.create_mission(goal)
+    try:
+        return await service.create_mission(goal, request.dataset_id)
+    except DatasetNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
 
 
 @router.get("/{mission_id}", response_model=MissionDetailResponse)

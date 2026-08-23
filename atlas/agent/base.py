@@ -13,6 +13,6 @@ class MissionPlanner(Protocol):
         """Human-readable planner source identifier."""
         ...
 
-    async def create_plan(self, goal: str) -> ExecutionPlan:
+    async def create_plan(self, goal: str, dataset_id: str | None = None) -> ExecutionPlan:
         """Generate an execution plan for the given goal."""
         ...
