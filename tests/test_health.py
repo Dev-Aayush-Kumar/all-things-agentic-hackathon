@@ -5,6 +5,7 @@ from httpx import ASGITransport, AsyncClient
 
 from atlas.api.dependencies import (
     get_app_settings,
+    get_approval_service,
     get_dataset_service,
     get_mission_service,
     get_mission_worker,
@@ -62,6 +63,7 @@ async def test_health_and_ready_do_not_expose_secrets(monkeypatch: pytest.Monkey
     get_mission_service.cache_clear()
     get_dataset_service.cache_clear()
     get_mission_worker.cache_clear()
+    get_approval_service.cache_clear()
     app = create_app()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -88,6 +90,7 @@ async def test_ready_reports_missing_cloud_backends(monkeypatch: pytest.MonkeyPa
     get_mission_service.cache_clear()
     get_dataset_service.cache_clear()
     get_mission_worker.cache_clear()
+    get_approval_service.cache_clear()
     app = create_app()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:

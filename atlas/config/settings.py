@@ -172,6 +172,17 @@ class Settings(BaseSettings):
     memory_content_max_chars: int = Field(
         default=800, alias="ATLAS_MEMORY_CONTENT_MAX_CHARS"
     )
+    strategy_enabled: bool = Field(default=True, alias="ATLAS_STRATEGY_ENABLED")
+    strategy_max_retrieval: int = Field(
+        default=3, alias="ATLAS_STRATEGY_MAX_RETRIEVAL"
+    )
+    strategy_min_confidence: float = Field(
+        default=0.60, alias="ATLAS_STRATEGY_MIN_CONFIDENCE"
+    )
+    governance_enabled: bool = Field(default=True, alias="ATLAS_GOVERNANCE_ENABLED")
+    approval_ttl_seconds: float = Field(
+        default=3600.0, alias="ATLAS_APPROVAL_TTL_SECONDS"
+    )
 
     # Durable execution
     worker_id: str | None = Field(default=None, alias="ATLAS_WORKER_ID")
@@ -320,6 +331,8 @@ class Settings(BaseSettings):
             "external_tools_enabled": self.external_tools_enabled,
             "fetch_url_enabled": self.fetch_url_enabled,
             "memory_enabled": self.memory_enabled,
+            "strategy_enabled": self.strategy_enabled,
+            "governance_enabled": self.governance_enabled,
         }
 
 

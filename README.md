@@ -2,9 +2,9 @@
 
 **Autonomous Task & Lifecycle Agent System**
 
-ATLAS is an autonomous operations agent built for the Google All Things Agentic Hackathon 2026. It accepts a high-level goal, plans work, investigates uploaded CSV datasets with allowlisted tools, can apply **controlled remediations** to a working copy, and produces an evidence-based report.
+ATLAS is an autonomous operations agent built for the Google All Things Agentic Hackathon 2026. It accepts a high-level goal, plans work, investigates uploaded CSV datasets with allowlisted tools, can apply **controlled remediations** to a working copy after **human approval**, and produces an evidence-based report.
 
-Round 10 adds **persistent memory**: after a mission completes, ATLAS extracts structured knowledge, stores it, and can retrieve a bounded set into later reasoning. Memory is advisory. Current evidence wins. Rounds 5–9 remain.
+Round 12 adds **human-in-the-loop governance**: after ATLAS validates a model decision, a dedicated `GovernancePolicy` chooses AUTO_APPROVE, REQUIRE_APPROVAL, or DENY. Remediation pauses the mission on a durable approval request. A human approves or rejects the **exact persisted fingerprint**; the worker then resumes the existing supervisor loop. Memory, strategies, Gemini, and local fallback cannot grant approval. Rounds 5–11 remain.
 
 ## Problem
 
@@ -16,15 +16,16 @@ ATLAS inverts that model for dataset missions:
 2. Create a mission with a high-level investigation goal and `dataset_id`.
 3. A supervisor asks a typed decision-maker what to do next. Gemini/ADK when configured; deterministic local fallback otherwise.
 4. ATLAS validates every decision against the capability catalog, Agent Registry, Action Registry, and External Tool Registry.
-5. If a remediation is authorized, it runs only on a working copy — never the uploaded original — and must pass postcondition verification.
-6. If an external capability is authorized, ATLAS executes the registered tool and stores a bounded evidence excerpt with provenance.
-7. Facts come from allowlisted observation tools. External pages are labeled separately and never silently override dataset measurements. Decisions come from the model or local policy. Execution stays inside ATLAS.
+5. ATLAS governance evaluates the validated decision. Read-only work may auto-approve; remediations require a human; unknown work is denied.
+6. If a remediation is approved, it runs only on a working copy — never the uploaded original — and must pass postcondition verification.
+7. If an external capability is authorized, ATLAS executes the registered tool and stores a bounded evidence excerpt with provenance.
+8. Facts come from allowlisted observation tools. External pages are labeled separately and never silently override dataset measurements. Decisions come from the model or local policy. Execution stays inside ATLAS.
 
 ## What makes ATLAS agentic
 
 ATLAS is agentic because a supervisor runs a bounded decision loop:
 
-**MISSION → MODEL DECISION → ATLAS VALIDATES → ATLAS EXECUTES → ATLAS OBSERVES → MODEL SEES EVIDENCE → MODEL DECIDES AGAIN → REPORT**
+**MISSION → MODEL DECISION → ATLAS VALIDATES → GOVERNANCE → (AUTO-APPROVE | HUMAN APPROVAL | DENY) → ATLAS EXECUTES → ATLAS OBSERVES → MODEL SEES EVIDENCE → MODEL DECIDES AGAIN → REPORT**
 
 That loop:
 
@@ -46,6 +47,12 @@ Gemini / local decision-maker
         ↓  typed DELEGATE | OBSERVE | ACTION | EXTERNAL | COMPLETE
 ATLAS validates (catalog + registries + limits)
         ↓
+GovernancePolicy (AUTO_APPROVE | REQUIRE_APPROVAL | DENY)
+        ↓
+AUTO_APPROVE → execute
+REQUIRE_APPROVAL → durable ApprovalRequest → WAITING_FOR_APPROVAL
+DENY → record and replan
+        ↓
 ATLAS executes specialists / tools / actions / registered external tools
         ↓
 Structured evidence (never raw CSV or raw HTML to the model)
@@ -55,7 +62,7 @@ Supervisor feeds evidence back
 Next typed decision or COMPLETE
 ```
 
-Gemini is the decision-maker when configured. ATLAS is the enforcement and execution environment. Gemini never executes HTTP, shell, or Python. The model cannot bypass registries, verification, or loop limits.
+Gemini is the decision-maker when configured. ATLAS is the enforcement, governance, and execution environment. Gemini never executes HTTP, shell, or Python, and never approves its own work. The model cannot bypass registries, governance, verification, or loop limits.
 
 Specialists remain role-scoped:
 
@@ -212,19 +219,19 @@ Transports:
 Lifecycle:
 
 ```
-CREATED → PLANNING → EXECUTING → COMPLETED
+CREATED → PLANNING → EXECUTING → WAITING_FOR_APPROVAL → EXECUTING → COMPLETED
                               └→ FAILED
 ```
 
 Worker/dispatch state (durable, separate):
 
 ```
-QUEUED → CLAIMED → RUNNING → COMPLETED
+QUEUED → CLAIMED → RUNNING → WAITING_FOR_APPROVAL → QUEUED → CLAIMED → RUNNING → COMPLETED
                            └→ FAILED
                            └→ EXHAUSTED (max attempts after lease expiry)
 ```
 
-The API persists the mission as `QUEUED` and dispatches. It does not run the long-lived workflow inline. `GET /missions/{id}` includes `execution` metadata: state, attempt count, whether currently claimed, worker id while the lease is valid.
+The API persists the mission as `QUEUED` and dispatches. It does not run the long-lived workflow inline. `GET /missions/{id}` includes `execution` metadata: state, attempt count, whether currently claimed, worker id while the lease is valid. When governance pauses work it also includes `pending_approval` and `governance_events`.
 
 ### Claiming and leases
 
@@ -237,8 +244,9 @@ A worker claims a mission atomically (SQLite `BEGIN IMMEDIATE`, or a Firestore t
 - If attempts remain: clear the lease, mark `QUEUED`, dispatch again.
 - If `attempt_count >= max_attempts`: mark lifecycle `FAILED` and execution `EXHAUSTED`.
 - Never touches `COMPLETED` or `FAILED` missions.
+- Missions in `WAITING_FOR_APPROVAL` are not treated as abandoned workers. Pending approvals stay until a human resolves them or they expire.
 
-Recovery re-dispatches the workflow from the start of planning; it does not checkpoint mid-agent-loop.
+Recovery re-dispatches the workflow from the start of planning; it does not checkpoint mid-agent-loop. Completed specialist tasks are skipped. An approved (or rejected/expired) request is resumed rather than inventing a new operation.
 
 ### Idempotency
 
@@ -289,6 +297,63 @@ Adaptive follow-up is evidence-driven (extreme numeric range → outliers; highl
 | Success | Structured evidence recorded | Postcondition **verified** |
 
 Gemini never sits on the action execution path. The model may propose or interpret. ATLAS validates authorization and parameters, executes, and verifies.
+
+## Human-in-the-loop governance
+
+Governance is **not** another execution path. It sits after validation and before execution:
+
+```
+Gemini / LocalDecisionMaker
+        ↓
+ModelDecision
+        ↓
+validate_decision()
+        ↓
+GovernancePolicy.evaluate()
+        ↓
+AUTO_APPROVE → execute
+REQUIRE_APPROVAL → persist ApprovalRequest → WAITING_FOR_APPROVAL (lease released)
+DENY → reject and replan
+        ↓
+execution / observation / replan
+```
+
+The model cannot approve itself. Local fallback uses the same policy and is never labeled Gemini. Historical memory and strategies remain advisory; they cannot turn `REQUIRE_APPROVAL` into `AUTO_APPROVE`.
+
+| Kind | Default policy | Risk |
+|------|----------------|------|
+| OBSERVE (dataset tools) | AUTO_APPROVE | LOW |
+| DELEGATE allowlisted read-only specialist work | AUTO_APPROVE | LOW |
+| ACTION `REMOVE_DUPLICATES` / `FILL_MISSING_VALUES` | REQUIRE_APPROVAL | MEDIUM |
+| EXTERNAL `FETCH_URL` after destination policy | AUTO_APPROVE | LOW |
+| Unknown / unregistered / forbidden | DENY | HIGH |
+| COMPLETE | AUTO_APPROVE | LOW |
+
+Approval is for an **exact operation fingerprint**. The approve API cannot change parameters. Secrets, credentials, headers, cookies, and raw datasets are never stored on the request.
+
+Example:
+
+1. Mission automatically observes the uploaded CSV (auto-approved).
+2. Supervisor proposes `REMOVE_DUPLICATES` on the working copy.
+3. `GET /missions/{id}` returns `WAITING_FOR_APPROVAL` with `pending_approval`.
+4. Human calls `POST /missions/{id}/approvals/{approval_id}/approve`.
+5. Worker claims a fresh lease (`resume_without_attempt` so attempt budget is not burned).
+6. ATLAS executes the persisted snapshot through the existing ActionExecutor, verifies postconditions, and continues the loop.
+7. Source datasets remain immutable.
+
+Reject records the decision and replans; it does not execute. Expired requests cannot execute. Duplicate approve/reject calls are idempotent. A worker crash while waiting does not create a second request.
+
+```bash
+curl http://localhost:8000/missions/{mission_id}/approvals
+curl -X POST http://localhost:8000/missions/{mission_id}/approvals/{approval_id}/approve \
+  -H "Content-Type: application/json" \
+  -d "{\"resolver\": \"human\"}"
+curl -X POST http://localhost:8000/missions/{mission_id}/approvals/{approval_id}/reject \
+  -H "Content-Type: application/json" \
+  -d "{\"resolver\": \"human\"}"
+```
+
+Replaceable pieces: `GovernancePolicy`, `ApprovalRepository` (SQLite / Firestore), `ApprovalService`, approval expiration/recovery. Policy does not live in ActionExecutor, ExternalToolExecutor, or the decision-makers.
 
 ### Action registry and authorization
 
@@ -377,9 +442,9 @@ The dataset is bound in-memory as `ToolContext`. Actions write only generated wo
 
 ```
 atlas/
-├── api/routes/           # /health, /ready, /datasets, /missions, Pub/Sub push
+├── api/routes/           # /health, /ready, /datasets, /missions, approvals, Pub/Sub push
 ├── agent/                # Tools, policy, planner, reasoner (ADK / local)
-├── ops/                  # Supervisor, registry, delegation, specialists, actions
+├── ops/                  # Supervisor, registry, governance, actions, memory, learning
 ├── investigation/        # Deterministic CSV analyzers used by tools
 ├── storage/              # Local filesystem or Cloud Storage
 ├── persistence/          # SQLite or Firestore
@@ -630,6 +695,28 @@ If that flag is unset, those tests are skipped.
 - `GET /memory` and `GET /memory/{id}` for inspection
 - Events: `MEMORY_EXTRACTION_STARTED`, `MEMORY_EXTRACTED`, `MEMORY_MERGED`, `MEMORY_REJECTED`, `MEMORY_EXTRACTION_FAILED`
 
+### Round 11
+
+- Deterministic post-completion **experience evaluation** (success / evidence / efficiency scores in `[0, 1]`)
+- Aggregated **strategy records** that recommend only allowlisted catalog capabilities
+- Bounded lexical/category/dataset retrieval into `historical_strategies` (separate from evidence and memory)
+- Local fallback may propose extra allowlisted observations from retrieved strategies; validation still applies
+- One run stays low-confidence; two consistent successful runs can cross `ATLAS_STRATEGY_MIN_CONFIDENCE`
+- Failures lower aggregate performance; forbidden capabilities are never learned as strategies
+- SQLite and Firestore persistence; `GET /strategies`, `GET /strategies/{id}`, `GET /experiences/{mission_id}`
+- Events: `EXPERIENCE_RECORDED`, `EXPERIENCE_MERGED`, `STRATEGY_UPDATED`, `STRATEGY_REJECTED`, `STRATEGY_EXTRACTION_FAILED`, `STRATEGY_RETRIEVED`
+
+### Round 12
+
+- `GovernancePolicy` after `validate_decision()` and before execution (`AUTO_APPROVE` / `REQUIRE_APPROVAL` / `DENY`)
+- Durable `ApprovalRequest` with SQLite and Firestore repositories and codec
+- Mission/execution state `WAITING_FOR_APPROVAL`; worker releases the lease and does not burn budgets while waiting
+- `POST /missions/{id}/approvals/{id}/approve|reject` and `GET /missions/{id}/approvals` (idempotent; fingerprint-exact)
+- Resume executes the persisted snapshot through existing executors; reject/expire replans without executing
+- Memory, strategies, Gemini, and local fallback cannot grant approval
+- Governance audit events on `GET /missions/{id}` (`governance_events`, `pending_approval`)
+- Events: `GOVERNANCE_EVALUATED`, `GOVERNANCE_DENIED`, `APPROVAL_REQUESTED` … `APPROVAL_CONSUMED`
+
 ## Memory
 
 ATLAS memory is **not** a transcript dump and **not** a RAG platform.
@@ -673,6 +760,46 @@ Gemini may propose memories when configured. It cannot write SQLite/Firestore or
 
 Vector search is intentionally omitted: the vertical slice is durable, inspectable, and cheap.
 
+## Strategy learning
+
+ATLAS learning is **not** self-modifying code and **not** a second reasoning loop.
+
+```
+Mission completes
+        ↓
+Deterministic evaluator scores success / evidence / efficiency
+        ↓
+ExperienceRecord (one per mission_id fingerprint)
+        ↓
+Strategy aggregate (allowlisted capabilities only)
+        ↓
+Later mission retrieves a bounded set
+        ↓
+historical_strategies in reasoning context
+        ↓
+Decision maker may propose extra allowlisted observations
+        ↓
+validate_decision + registries still apply
+```
+
+**Experience vs mission state:** an experience is a compact normalized outcome. It does not copy transcripts, raw CSV cells, prompts, or credentials. Dataset signatures store column names, inferred types, row-count bucket, and missingness bucket only.
+
+**Scores (all in 0.0–1.0):**
+- Success: completed lifecycle, minus failed tasks/actions
+- Evidence: profile present, successful dataset evidence exists, goal-aligned tools ran, specialist completion ratio. Finding *count* is not rewarded
+- Efficiency: leftover iteration/tool/model budget, minus failures, repeated decisions, and retries
+
+**Strategy confidence:**
+- 1 excellent run → about 0.40 (below default `ATLAS_STRATEGY_MIN_CONFIDENCE=0.60`)
+- 2 consistent excellent runs → about 0.70
+- 3 → about 0.80
+- Cap 0.95. Failures lower `success_rate` and therefore confidence
+- Sample factor and quality are explicit policy, not model-reported truth
+
+**Influence:** retrieved strategies may add observation tools already in the catalog (`profile_dataset`, `analyze_duplicates`, `analyze_outliers`, …) when the current dataset supports them. They cannot propose `EXECUTE_SHELL`, actions, or `FETCH_URL`. Those still require their own authorization. Current evidence follow-ups run first.
+
+Gemini may *see* `historical_strategies` when configured. It cannot write experience/strategy stores or change the catalog.
+
 ## Optional / future
 
 These are **not** implemented in this round:
@@ -694,6 +821,8 @@ These are **not** implemented in this round:
 - When Gemini is configured it proposes typed supervisor decisions; ATLAS still executes tools and actions
 - Default tests use scripted/local decisions and do not call live Gemini
 - Live Gemini supervisor decisions depend on credentials in the environment running the process
+- Approval TTL is bounded (`ATLAS_APPROVAL_TTL_SECONDS`); there is no standing human-inbox UI
+- Governance is an explicit allowlist policy, not a generic RBAC/compliance framework
 - Working-copy writes are not a transactional filesystem: a crash after a successful write and before persist can leave an unused object; retry uses the last verified version
 - Only dataset remediations inside the working-copy sandbox; no arbitrary external side effects
 - External fetches are limited to registered tools and the configured domain allowlist
@@ -705,6 +834,10 @@ These are **not** implemented in this round:
 - Live Google Cloud verification depends on credentials in the environment running the tests
 - Memory retrieval is lexical, not semantic; similar phrasing may miss a relevant memory
 - Memory extraction is post-completion enrichment and does not fail the mission if it errors
+- Strategy retrieval is lexical/category/dataset overlap, not semantic search
+- One successful mission is intentionally low-confidence and is not retrieved at the default threshold
+- Strategy influence suggests observation tools only; it does not auto-authorize remediations or external fetches
+- Learning evaluation is post-completion enrichment and does not fail the mission if it errors
 
 ## License
 

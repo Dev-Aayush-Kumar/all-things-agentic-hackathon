@@ -9,6 +9,7 @@ class MissionStatus(str, Enum):
     CREATED = "CREATED"
     PLANNING = "PLANNING"
     EXECUTING = "EXECUTING"
+    WAITING_FOR_APPROVAL = "WAITING_FOR_APPROVAL"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
 
@@ -19,6 +20,7 @@ class ExecutionState(str, Enum):
     QUEUED = "QUEUED"
     CLAIMED = "CLAIMED"
     RUNNING = "RUNNING"
+    WAITING_FOR_APPROVAL = "WAITING_FOR_APPROVAL"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     EXHAUSTED = "EXHAUSTED"
@@ -48,6 +50,7 @@ class AgentPhase(str, Enum):
     ACTING = "ACTING"
     VERIFYING = "VERIFYING"
     SYNTHESIZING = "SYNTHESIZING"
+    WAITING_FOR_APPROVAL = "WAITING_FOR_APPROVAL"
     COMPLETING = "COMPLETING"
 
 
@@ -135,6 +138,20 @@ class EventType(str, Enum):
     MEMORY_MERGED = "MEMORY_MERGED"
     MEMORY_REJECTED = "MEMORY_REJECTED"
     MEMORY_EXTRACTION_FAILED = "MEMORY_EXTRACTION_FAILED"
+    EXPERIENCE_RECORDED = "EXPERIENCE_RECORDED"
+    EXPERIENCE_MERGED = "EXPERIENCE_MERGED"
+    STRATEGY_UPDATED = "STRATEGY_UPDATED"
+    STRATEGY_REJECTED = "STRATEGY_REJECTED"
+    STRATEGY_EXTRACTION_FAILED = "STRATEGY_EXTRACTION_FAILED"
+    STRATEGY_RETRIEVED = "STRATEGY_RETRIEVED"
+    GOVERNANCE_EVALUATED = "GOVERNANCE_EVALUATED"
+    GOVERNANCE_DENIED = "GOVERNANCE_DENIED"
+    APPROVAL_REQUESTED = "APPROVAL_REQUESTED"
+    APPROVAL_APPROVED = "APPROVAL_APPROVED"
+    APPROVAL_REJECTED = "APPROVAL_REJECTED"
+    APPROVAL_EXPIRED = "APPROVAL_EXPIRED"
+    APPROVAL_RESUMED = "APPROVAL_RESUMED"
+    APPROVAL_CONSUMED = "APPROVAL_CONSUMED"
     FINAL_REASONING_COMPLETED = "FINAL_REASONING_COMPLETED"
     MISSION_COMPLETED = "MISSION_COMPLETED"
     MISSION_FAILED = "MISSION_FAILED"
@@ -224,6 +241,43 @@ class MemoryExtractionSource(str, Enum):
     DETERMINISTIC_EVIDENCE = "DETERMINISTIC_EVIDENCE"
 
 
+class MissionCategory(str, Enum):
+    """Coarse goal category used for strategy matching. Not a free-form label."""
+
+    DATA_QUALITY = "DATA_QUALITY"
+    DUPLICATES = "DUPLICATES"
+    MISSING = "MISSING"
+    OUTLIERS = "OUTLIERS"
+    CONSISTENCY = "CONSISTENCY"
+    GENERAL = "GENERAL"
+
+
+class ExperienceOutcome(str, Enum):
+    """Compact mission outcome. Not a transcript."""
+
+    SUCCESS = "SUCCESS"
+    PARTIAL = "PARTIAL"
+    FAILURE = "FAILURE"
+
+
+class MissingnessBucket(str, Enum):
+    """Dataset missingness band. No raw cell values."""
+
+    NONE = "NONE"
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+
+
+class RowCountBucket(str, Enum):
+    """Row-count band. No raw row contents."""
+
+    XS = "XS"
+    S = "S"
+    M = "M"
+    L = "L"
+
+
 class ExternalAuthorizationMode(str, Enum):
     """How a registered external tool may be authorized today."""
 
@@ -237,6 +291,33 @@ class ActionRisk(str, Enum):
     LOW = "LOW"
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
+
+
+class GovernanceVerdict(str, Enum):
+    """ATLAS policy outcome. The model cannot emit this."""
+
+    AUTO_APPROVE = "AUTO_APPROVE"
+    REQUIRE_APPROVAL = "REQUIRE_APPROVAL"
+    DENY = "DENY"
+
+
+class ApprovalStatus(str, Enum):
+    """Lifecycle of a durable human-approval request."""
+
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    EXPIRED = "EXPIRED"
+    CANCELLED = "CANCELLED"
+    CONSUMED = "CONSUMED"
+
+
+class ApprovalResolverSource(str, Enum):
+    """Who resolved an approval. Never GEMINI."""
+
+    HUMAN = "HUMAN"
+    SYSTEM = "SYSTEM"
+    LOCAL_FALLBACK = "LOCAL_FALLBACK"
 
 
 class Severity(str, Enum):

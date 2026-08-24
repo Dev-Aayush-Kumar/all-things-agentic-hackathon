@@ -31,12 +31,16 @@ class MissionService:
         recovery: MissionRecoveryService,
         settings: Settings,
         dataset_repository: DatasetRepository | None = None,
+        approval_repository=None,
+        approval_service=None,
     ) -> None:
         self._repository = repository
         self._dispatcher = dispatcher
         self._recovery = recovery
         self._settings = settings
         self._dataset_repository = dataset_repository
+        self._approval_repository = approval_repository
+        self._approval_service = approval_service
 
     async def create_mission(
         self,
@@ -108,7 +112,19 @@ class MissionService:
         mission = await self._repository.get(mission_id)
         if mission is None:
             return None
-        return MissionDetailResponse.from_mission(mission)
+        if self._approval_service is not None:
+            await self._approval_service.expire_due(mission)
+            mission = await self._repository.get(mission_id) or mission
+        detail = MissionDetailResponse.from_mission(mission)
+        if self._approval_service is not None:
+            detail.pending_approval = await self._approval_service.pending_for_mission(mission)
+        elif self._approval_repository is not None and mission.pending_approval_id:
+            record = await self._approval_repository.get(mission.pending_approval_id)
+            if record is not None:
+                from atlas.domain.models import public_approval
+
+                detail.pending_approval = public_approval(record)
+        return detail
 
     async def recover_abandoned(self) -> RecoveryResult:
         """Requeue or exhaust missions with expired leases."""

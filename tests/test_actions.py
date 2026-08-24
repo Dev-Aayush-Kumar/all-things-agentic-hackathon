@@ -525,9 +525,29 @@ async def test_http_mission_exposes_action_state(client: AsyncClient) -> None:
             "dataset_id": upload.json()["dataset_id"],
         },
     )
-    final = await wait_for_mission_status(
-        client, created.json()["mission_id"], {"COMPLETED", "FAILED"}
-    )
+    mission_id = created.json()["mission_id"]
+    final: dict = {}
+    for _ in range(6):
+        payload = await wait_for_mission_status(
+            client, mission_id, {"COMPLETED", "FAILED", "WAITING_FOR_APPROVAL"}
+        )
+        if payload["status"] in {"COMPLETED", "FAILED"}:
+            final = payload
+            break
+        assert payload["pending_approval"] is not None
+        assert payload["execution"]["state"] == "WAITING_FOR_APPROVAL"
+        listed = await client.get(f"/missions/{mission_id}/approvals")
+        assert listed.status_code == 200
+        pending = [item for item in listed.json()["items"] if item["status"] == "PENDING"]
+        assert pending
+        approved = await client.post(
+            f"/missions/{mission_id}/approvals/{pending[0]['approval_id']}/approve",
+            json={"resolver": "human"},
+        )
+        assert approved.status_code == 200
+    else:
+        raise TimeoutError("Mission never completed after approvals")
+    assert final["status"] == "COMPLETED"
     assert final["status"] == "COMPLETED"
     assert final["actions"]
     assert final["working_copy"] is not None

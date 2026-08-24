@@ -24,18 +24,23 @@ class MissionRecoveryService:
     """Requeue or exhaust missions whose worker leases have expired.
 
     Invoke explicitly (tests, local ops). Not a standing scheduler.
+    Waiting-for-approval missions are not recovered as abandoned workers.
+    Expired approvals are marked and requeued for replanning.
     """
 
     def __init__(
         self,
         repository: MissionRepository,
         dispatcher: MissionDispatcher,
+        approval_repository=None,
     ) -> None:
         self._repository = repository
         self._dispatcher = dispatcher
+        self._approval_repository = approval_repository
 
     async def recover(self) -> RecoveryResult:
         result = RecoveryResult()
+        await self._expire_approvals()
         abandoned = await self._repository.list_recoverable()
         for mission in abandoned:
             if mission.execution.attempt_count >= mission.execution.max_attempts:
@@ -55,3 +60,15 @@ class MissionRecoveryService:
             result.recovered_mission_ids.append(mission.mission_id)
             logger.info("Recovered mission %s", mission.mission_id)
         return result
+
+    async def _expire_approvals(self) -> None:
+        if self._approval_repository is None:
+            return
+        from atlas.services.approval_service import ApprovalService
+
+        service = ApprovalService(
+            self._approval_repository,
+            self._repository,
+            self._dispatcher,
+        )
+        await service.expire_due()

@@ -22,7 +22,9 @@ os.environ.setdefault("ATLAS_EXECUTION_LEASE_SECONDS", "120")
 
 from atlas.api.dependencies import (
     get_app_settings,
+    get_approval_service,
     get_dataset_service,
+    get_learning_service,
     get_memory_service,
     get_mission_service,
     get_mission_worker,
@@ -59,6 +61,8 @@ def test_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
         get_dataset_service.cache_clear()
         get_mission_worker.cache_clear()
         get_memory_service.cache_clear()
+        get_learning_service.cache_clear()
+        get_approval_service.cache_clear()
         yield db_path
         get_settings.cache_clear()
         get_app_settings.cache_clear()
@@ -66,6 +70,8 @@ def test_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
         get_dataset_service.cache_clear()
         get_mission_worker.cache_clear()
         get_memory_service.cache_clear()
+        get_learning_service.cache_clear()
+        get_approval_service.cache_clear()
 
 
 @pytest.fixture
@@ -77,6 +83,8 @@ def app():
     get_dataset_service.cache_clear()
     get_mission_worker.cache_clear()
     get_memory_service.cache_clear()
+    get_learning_service.cache_clear()
+    get_approval_service.cache_clear()
     return create_app()
 
 

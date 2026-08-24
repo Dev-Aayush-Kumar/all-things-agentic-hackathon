@@ -27,6 +27,7 @@ _LEASE_CLEAR_STATES = {
     ExecutionState.COMPLETED,
     ExecutionState.FAILED,
     ExecutionState.EXHAUSTED,
+    ExecutionState.WAITING_FOR_APPROVAL,
 }
 
 

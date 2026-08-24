@@ -102,6 +102,48 @@ class UnknownMemoryError(Exception):
     """Raised when a memory id is not found."""
 
 
+class StrategyValidationError(Exception):
+    """Raised when a strategy or experience record is malformed or not allowlisted."""
+
+
+class UnknownStrategyError(Exception):
+    """Raised when a strategy id is not found."""
+
+
+class UnknownExperienceError(Exception):
+    """Raised when an experience for a mission is not found."""
+
+
+class GovernanceDeniedError(Exception):
+    """Raised when ATLAS policy denies a validated decision."""
+
+
+class WaitingForApproval(Exception):
+    """Supervisor pause: a validated operation needs a human decision."""
+
+    def __init__(self, approval_id: str, mission_id: str) -> None:
+        self.approval_id = approval_id
+        self.mission_id = mission_id
+        super().__init__(
+            f"Mission '{mission_id}' is waiting for approval '{approval_id}'"
+        )
+
+
+class ApprovalError(Exception):
+    """Base approval API/domain error."""
+
+
+class ApprovalNotFoundError(ApprovalError):
+    def __init__(self, approval_id: str) -> None:
+        self.approval_id = approval_id
+        super().__init__(f"Approval '{approval_id}' not found")
+
+
+class ApprovalConflictError(ApprovalError):
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
+
 class ActionExecutionError(Exception):
     """Raised when a registered action fails during execution or verification."""
 

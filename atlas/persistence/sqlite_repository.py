@@ -233,12 +233,16 @@ class SQLiteMissionRepository(MissionRepository):
                     attempt_count = ?,
                     max_attempts = ?,
                     lease_expires_at = CASE
-                        WHEN ? IN (?, ?, ?) THEN NULL
+                        WHEN ? IN (?, ?, ?, ?) THEN NULL
                         ELSE lease_expires_at
                     END,
                     worker_id = CASE
-                        WHEN ? IN (?, ?, ?) THEN NULL
+                        WHEN ? IN (?, ?, ?, ?) THEN NULL
                         ELSE worker_id
+                    END,
+                    execution_id = CASE
+                        WHEN ? IN (?, ?, ?, ?) THEN NULL
+                        ELSE execution_id
                     END,
                     updated_at = ?
                 WHERE mission_id = ?
@@ -258,10 +262,17 @@ class SQLiteMissionRepository(MissionRepository):
                     ExecutionState.COMPLETED.value,
                     ExecutionState.FAILED.value,
                     ExecutionState.EXHAUSTED.value,
+                    ExecutionState.WAITING_FOR_APPROVAL.value,
                     mission.execution.state.value,
                     ExecutionState.COMPLETED.value,
                     ExecutionState.FAILED.value,
                     ExecutionState.EXHAUSTED.value,
+                    ExecutionState.WAITING_FOR_APPROVAL.value,
+                    mission.execution.state.value,
+                    ExecutionState.COMPLETED.value,
+                    ExecutionState.FAILED.value,
+                    ExecutionState.EXHAUSTED.value,
+                    ExecutionState.WAITING_FOR_APPROVAL.value,
                     _iso(mission.updated_at),
                     mission.mission_id,
                     context.execution_id,
@@ -308,8 +319,8 @@ class SQLiteMissionRepository(MissionRepository):
                     attempt_count = attempt_count + 1,
                     updated_at = ?
                 WHERE mission_id = ?
-                  AND status NOT IN (?, ?)
-                  AND execution_state NOT IN (?, ?, ?)
+                  AND status NOT IN (?, ?, ?)
+                  AND execution_state NOT IN (?, ?, ?, ?)
                   AND attempt_count < max_attempts
                   AND (
                     execution_state = ?
@@ -329,9 +340,11 @@ class SQLiteMissionRepository(MissionRepository):
                     mission_id,
                     MissionStatus.COMPLETED.value,
                     MissionStatus.FAILED.value,
+                    MissionStatus.WAITING_FOR_APPROVAL.value,
                     ExecutionState.COMPLETED.value,
                     ExecutionState.FAILED.value,
                     ExecutionState.EXHAUSTED.value,
+                    ExecutionState.WAITING_FOR_APPROVAL.value,
                     ExecutionState.QUEUED.value,
                     ExecutionState.CLAIMED.value,
                     ExecutionState.RUNNING.value,
@@ -353,6 +366,13 @@ class SQLiteMissionRepository(MissionRepository):
             )
             attempt_row = await row.fetchone()
             attempt_count = int(attempt_row["attempt_count"]) if attempt_row else 1
+            if mission.execution.resume_without_attempt:
+                attempt_count = max(0, attempt_count - 1)
+                mission.execution.resume_without_attempt = False
+                await db.execute(
+                    "UPDATE missions SET attempt_count = ? WHERE mission_id = ?",
+                    (attempt_count, mission_id),
+                )
 
             mission.execution.state = ExecutionState.CLAIMED
             mission.execution.execution_id = execution_id
@@ -437,7 +457,7 @@ class SQLiteMissionRepository(MissionRepository):
                        lease_expires_at, attempt_count, max_attempts
                 FROM missions
                 WHERE status NOT IN (?, ?)
-                  AND execution_state NOT IN (?, ?, ?, ?)
+                  AND execution_state NOT IN (?, ?, ?, ?, ?)
                   AND lease_expires_at IS NOT NULL
                   AND lease_expires_at <= ?
                 """,
@@ -448,6 +468,7 @@ class SQLiteMissionRepository(MissionRepository):
                     ExecutionState.FAILED.value,
                     ExecutionState.EXHAUSTED.value,
                     ExecutionState.QUEUED.value,
+                    ExecutionState.WAITING_FOR_APPROVAL.value,
                     _iso(current),
                 ),
             )

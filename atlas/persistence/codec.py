@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from atlas.domain.models import DatasetRecord, MemoryRecord, Mission
+from atlas.domain.models import (
+    ApprovalRequest,
+    DatasetRecord,
+    ExperienceRecord,
+    MemoryRecord,
+    Mission,
+    StrategyRecord,
+)
 
 
 def mission_to_document(mission: Mission) -> dict[str, Any]:
@@ -64,3 +71,61 @@ def document_to_memory(document: dict[str, Any]) -> MemoryRecord:
     if isinstance(payload, dict):
         return MemoryRecord.model_validate(payload)
     return MemoryRecord.model_validate(document)
+
+
+def experience_to_document(record: ExperienceRecord) -> dict[str, Any]:
+    payload = record.model_dump(mode="json")
+    return {
+        "experience_id": record.experience_id,
+        "fingerprint": record.fingerprint,
+        "mission_id": record.mission_id,
+        "created_at": record.created_at.isoformat(),
+        "payload": payload,
+    }
+
+
+def document_to_experience(document: dict[str, Any]) -> ExperienceRecord:
+    payload = document.get("payload")
+    if isinstance(payload, dict):
+        return ExperienceRecord.model_validate(payload)
+    return ExperienceRecord.model_validate(document)
+
+
+def strategy_to_document(record: StrategyRecord) -> dict[str, Any]:
+    payload = record.model_dump(mode="json")
+    return {
+        "strategy_id": record.strategy_id,
+        "fingerprint": record.fingerprint,
+        "mission_category": record.mission_category.value,
+        "confidence": record.confidence,
+        "created_at": record.created_at.isoformat(),
+        "updated_at": record.updated_at.isoformat(),
+        "payload": payload,
+    }
+
+
+def document_to_strategy(document: dict[str, Any]) -> StrategyRecord:
+    payload = document.get("payload")
+    if isinstance(payload, dict):
+        return StrategyRecord.model_validate(payload)
+    return StrategyRecord.model_validate(document)
+
+
+def approval_to_document(record: ApprovalRequest) -> dict[str, Any]:
+    payload = record.model_dump(mode="json")
+    return {
+        "approval_id": record.approval_id,
+        "mission_id": record.mission_id,
+        "fingerprint": record.fingerprint,
+        "status": record.status.value,
+        "requested_at": record.requested_at.isoformat(),
+        "expires_at": record.expires_at.isoformat(),
+        "payload": payload,
+    }
+
+
+def document_to_approval(document: dict[str, Any]) -> ApprovalRequest:
+    payload = document.get("payload")
+    if isinstance(payload, dict):
+        return ApprovalRequest.model_validate(payload)
+    return ApprovalRequest.model_validate(document)

@@ -10,7 +10,7 @@ from atlas.agent.reasoner_base import InvestigationReasoner
 from atlas.agent.tools import ToolContext
 from atlas.config.settings import Settings
 from atlas.domain.enums import EventType, ExecutionState, MissionStatus, StepStatus
-from atlas.domain.exceptions import DatasetParseError, StaleExecutionError
+from atlas.domain.exceptions import DatasetParseError, StaleExecutionError, WaitingForApproval
 from atlas.domain.models import Mission, MissionEvent, WorkingCopyState, utc_now
 from atlas.execution.context import ExecutionContext
 from atlas.investigation.parser import parse_csv_bytes
@@ -40,6 +40,9 @@ class MissionWorkflowRunner:
         settings: Settings | None = None,
         step_delay_seconds: float = 0.0,
         memory_repository=None,
+        experience_repository=None,
+        strategy_repository=None,
+        approval_repository=None,
     ) -> None:
         self._repository = repository
         self._planner = planner
@@ -50,6 +53,9 @@ class MissionWorkflowRunner:
         self._settings = settings
         self._step_delay_seconds = step_delay_seconds
         self._memory_repository = memory_repository
+        self._experience_repository = experience_repository
+        self._strategy_repository = strategy_repository
+        self._approval_repository = approval_repository
 
     async def run(
         self,
@@ -66,7 +72,9 @@ class MissionWorkflowRunner:
 
             try:
                 await self._plan(mission)
-                await self._execute(mission)
+                paused = await self._execute(mission)
+                if paused:
+                    return
             except StaleExecutionError:
                 logger.warning("Lost execution ownership for mission %s", mission_id)
                 return
@@ -106,7 +114,7 @@ class MissionWorkflowRunner:
         mission.touch()
         await self._persist(mission)
 
-    async def _execute(self, mission: Mission) -> None:
+    async def _execute(self, mission: Mission) -> bool:
         if mission.execution_plan is None:
             raise RuntimeError("Cannot execute mission without an execution plan")
 
@@ -115,10 +123,15 @@ class MissionWorkflowRunner:
         self._add_event(mission, EventType.EXECUTION_STARTED, "Execution started")
         await self._persist(mission)
 
-        if mission.dataset_id:
-            await self._execute_investigation(mission)
-        else:
-            await self._execute_generic_steps(mission)
+        try:
+            if mission.dataset_id:
+                paused = await self._execute_investigation(mission)
+                if paused:
+                    return True
+            else:
+                await self._execute_generic_steps(mission)
+        except WaitingForApproval:
+            return True
 
         mission.status = MissionStatus.COMPLETED
         mission.completed_at = utc_now()
@@ -127,6 +140,7 @@ class MissionWorkflowRunner:
         mission.touch()
         self._add_event(mission, EventType.MISSION_COMPLETED, "Mission completed")
         await self._persist(mission)
+        return False
 
     async def _execute_generic_steps(self, mission: Mission) -> None:
         assert mission.execution_plan is not None
@@ -165,7 +179,7 @@ class MissionWorkflowRunner:
             mission.touch()
             await self._persist(mission)
 
-    async def _execute_investigation(self, mission: Mission) -> None:
+    async def _execute_investigation(self, mission: Mission) -> bool:
         if self._dataset_repository is None or self._dataset_storage is None:
             raise RuntimeError("Dataset investigation dependencies are not configured")
         if self._reasoner is None or self._settings is None:
@@ -225,6 +239,12 @@ class MissionWorkflowRunner:
 
             memory_retriever = MemoryRetriever(self._memory_repository, self._settings)
 
+        strategy_retriever = None
+        if self._strategy_repository is not None and self._settings.strategy_enabled:
+            from atlas.ops.learning.retrieve import StrategyRetriever
+
+            strategy_retriever = StrategyRetriever(self._strategy_repository, self._settings)
+
         supervisor = Supervisor(
             reasoner=self._reasoner,
             settings=self._settings,
@@ -234,6 +254,8 @@ class MissionWorkflowRunner:
             dataset_storage=self._dataset_storage,
             decision_maker=decision_maker,
             memory_retriever=memory_retriever,
+            strategy_retriever=strategy_retriever,
+            approval_repository=self._approval_repository,
         )
         context = ToolContext(
             dataset_id=dataset.dataset_id,
@@ -245,8 +267,13 @@ class MissionWorkflowRunner:
             mission.touch()
             await self._persist(mission)
 
-        await supervisor.run(mission, context, persist)
+        try:
+            await supervisor.run(mission, context, persist)
+        except WaitingForApproval:
+            return True
         await self._extract_memory(mission)
+        await self._record_learning(mission)
+        return False
 
     async def _fail_mission(self, mission: Mission, error: str) -> None:
         mission.status = MissionStatus.FAILED
@@ -272,6 +299,7 @@ class MissionWorkflowRunner:
             {"error": error},
         )
         await self._persist(mission)
+        await self._record_learning(mission)
 
     async def _extract_memory(self, mission: Mission) -> None:
         if self._memory_repository is None or self._settings is None:
@@ -309,6 +337,37 @@ class MissionWorkflowRunner:
                 EventType.MEMORY_EXTRACTION_FAILED,
                 "Memory extraction failed",
                 {"error": str(exc)},
+            )
+
+    async def _record_learning(self, mission: Mission) -> None:
+        if self._experience_repository is None or self._strategy_repository is None:
+            return
+        if self._settings is None or not self._settings.strategy_enabled:
+            return
+        try:
+            from atlas.ops.learning.extract import record_experience_and_strategy
+
+            await record_experience_and_strategy(
+                mission,
+                self._experience_repository,
+                self._strategy_repository,
+                self._settings,
+            )
+        except Exception as exc:
+            logger.exception(
+                "Strategy learning failed for mission %s", mission.mission_id
+            )
+            self._add_event(
+                mission,
+                EventType.STRATEGY_EXTRACTION_FAILED,
+                "Strategy learning failed",
+                {"error": str(exc)},
+            )
+        try:
+            await self._persist(mission)
+        except Exception:
+            logger.exception(
+                "Persisting learning events failed for mission %s", mission.mission_id
             )
 
     async def _persist(self, mission: Mission) -> None:

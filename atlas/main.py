@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from atlas import __version__
-from atlas.api.routes import datasets, health, memory, missions, ops, pubsub
+from atlas.api.routes import approvals, datasets, health, learning, memory, missions, ops, pubsub
 from atlas.config.settings import get_settings
 
 logging.basicConfig(
@@ -43,7 +43,9 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(datasets.router)
     app.include_router(missions.router)
+    app.include_router(approvals.router)
     app.include_router(memory.router)
+    app.include_router(learning.router)
     app.include_router(ops.router)
     app.include_router(pubsub.router)
     return app

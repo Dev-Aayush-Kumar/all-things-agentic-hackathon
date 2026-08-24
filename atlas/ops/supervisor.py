@@ -17,12 +17,14 @@ from atlas.config.settings import Settings
 from atlas.domain.enums import (
     ActionStatus,
     AgentPhase,
+    ApprovalStatus,
     EventType,
+    GovernanceVerdict,
     ModelDecisionKind,
     PlannerSource,
     StepStatus,
 )
-from atlas.domain.exceptions import ModelDecisionError
+from atlas.domain.exceptions import ModelDecisionError, WaitingForApproval
 from atlas.domain.models import (
     ActionRecord,
     AgentPlan,
@@ -76,6 +78,9 @@ class Supervisor:
         decision_maker=None,
         external_executor=None,
         memory_retriever=None,
+        strategy_retriever=None,
+        governance_policy=None,
+        approval_repository=None,
     ) -> None:
         self._reasoner = reasoner
         self._settings = settings
@@ -90,6 +95,13 @@ class Supervisor:
         self._local_fallback_decider = LocalDecisionMaker()
         self._external_executor = external_executor
         self._memory_retriever = memory_retriever
+        self._strategy_retriever = strategy_retriever
+        self._governance_policy = governance_policy
+        if self._governance_policy is None:
+            from atlas.ops.governance.policy import default_governance_policy
+
+            self._governance_policy = default_governance_policy()
+        self._approval_repository = approval_repository
 
     async def run(
         self,
@@ -195,37 +207,40 @@ class Supervisor:
                 break
 
             ready = ready_tasks(plan)
-            if ready:
-                if any(task.capability in ACTION_CAPABILITIES for task in ready):
-                    mission.current_phase = AgentPhase.ACTING
-                else:
-                    mission.current_phase = AgentPhase.DELEGATING
-                plan.current_task_ids = [task.task_id for task in ready]
-                await persist()
-                await self._delegation.execute_ready(ready, workspace)
-                self._raise_if_critical_exhausted(plan)
-                mission.current_phase = AgentPhase.OBSERVING
-                _add_event(
-                    mission,
-                    EventType.SUPERVISOR_OBSERVED,
-                    "Supervisor observed specialist results",
-                    {
-                        "wave": plan.wave,
-                        "completed": [
-                            task.task_id
-                            for task in plan.tasks
-                            if task.status == StepStatus.COMPLETED
-                        ],
-                    },
-                )
-                await persist()
-                continue
-
-            should_continue = await self._consult_decision_maker(workspace)
-            if should_continue:
-                await persist()
-                continue
-            break
+            if not ready:
+                resumed = await self._resume_resolved_approval(workspace)
+                if resumed is True:
+                    await persist()
+                    continue
+                should_continue = await self._consult_decision_maker(workspace)
+                if should_continue:
+                    await persist()
+                    continue
+                break
+            if any(task.capability in ACTION_CAPABILITIES for task in ready):
+                mission.current_phase = AgentPhase.ACTING
+            else:
+                mission.current_phase = AgentPhase.DELEGATING
+            plan.current_task_ids = [task.task_id for task in ready]
+            await persist()
+            await self._delegation.execute_ready(ready, workspace)
+            self._raise_if_critical_exhausted(plan)
+            mission.current_phase = AgentPhase.OBSERVING
+            _add_event(
+                mission,
+                EventType.SUPERVISOR_OBSERVED,
+                "Supervisor observed specialist results",
+                {
+                    "wave": plan.wave,
+                    "completed": [
+                        task.task_id
+                        for task in plan.tasks
+                        if task.status == StepStatus.COMPLETED
+                    ],
+                },
+            )
+            await persist()
+            continue
 
         await self._ensure_report(workspace)
 
@@ -328,6 +343,7 @@ class Supervisor:
         mission.current_phase = AgentPhase.REASONING
         mission.reasoning_iteration += 1
         await self._refresh_memories(workspace)
+        await self._refresh_strategies(workspace)
         context = build_reasoning_context(workspace)
         context["_workspace"] = workspace
         _add_event(
@@ -406,14 +422,6 @@ class Supervisor:
                 return False
             return True
 
-        self._store_decision(
-            mission,
-            source=source,
-            decision=validated.decision,
-            accepted=True,
-            rejection_reason=None,
-            fingerprint=validated.fingerprint,
-        )
         _add_event(
             mission,
             EventType.MODEL_DECISION_VALIDATED,
@@ -423,10 +431,218 @@ class Supervisor:
                 "source": source.value,
             },
         )
+        from atlas.ops.learning.influence import note_strategy_influence
+
+        note_strategy_influence(workspace, validated.decision)
+
+        allowed = await self._govern_validated(workspace, validated, source)
+        if allowed == "stop":
+            return False
+        if allowed == "replan":
+            return True
+        if allowed == "done":
+            return True
         if self._repeated_limit_reached(mission, validated.fingerprint):
             self._hit_limit(mission, "Repeated identical decisions are bounded")
             return False
+        return await self._enact_validated(workspace, validated, source)
 
+    async def _govern_validated(self, workspace, validated, source) -> str:
+        """ATLAS policy. The model cannot approve itself. Returns False to skip execution."""
+        from atlas.ops.governance.events import append_governance_event
+        from atlas.ops.governance.lifecycle import (
+            apply_waiting_state,
+            persist_or_reuse_approval,
+        )
+        from atlas.ops.governance.policy import GovernanceDecision
+
+        mission = workspace.mission
+        governance = self._governance_policy.evaluate(validated, workspace)
+        if (
+            not workspace.settings.governance_enabled
+            and governance.verdict == GovernanceVerdict.REQUIRE_APPROVAL
+        ):
+            governance = GovernanceDecision(
+                verdict=GovernanceVerdict.AUTO_APPROVE,
+                risk=governance.risk,
+                reason="Governance disabled; validated operation auto-approved",
+                operation_kind=governance.operation_kind,
+                capability=governance.capability,
+                parameters=governance.parameters,
+                fingerprint=governance.fingerprint,
+                requested_operation=governance.requested_operation,
+            )
+        append_governance_event(
+            mission,
+            verdict=governance.verdict,
+            risk=governance.risk,
+            reason=governance.reason,
+            fingerprint=governance.fingerprint,
+            event_type=EventType.GOVERNANCE_EVALUATED,
+        )
+        if governance.verdict == GovernanceVerdict.DENY:
+            self._store_decision(
+                mission,
+                source=source,
+                decision=validated.decision,
+                accepted=False,
+                rejection_reason=governance.reason,
+                fingerprint=validated.fingerprint,
+            )
+            append_governance_event(
+                mission,
+                verdict=governance.verdict,
+                risk=governance.risk,
+                reason=governance.reason,
+                fingerprint=governance.fingerprint,
+                event_type=EventType.GOVERNANCE_DENIED,
+            )
+            if self._repeated_limit_reached(mission, validated.fingerprint):
+                self._hit_limit(mission, "Repeated identical decisions are bounded")
+                return "stop"
+            return "replan"
+        self._store_decision(
+            mission,
+            source=source,
+            decision=validated.decision,
+            accepted=True,
+            rejection_reason=None,
+            fingerprint=validated.fingerprint,
+        )
+        if governance.verdict == GovernanceVerdict.REQUIRE_APPROVAL:
+            if self._approval_repository is None:
+                return "execute"
+            decision_id = (
+                mission.reasoning_trace[-1].decision_id if mission.reasoning_trace else None
+            )
+            record = await persist_or_reuse_approval(
+                self._approval_repository,
+                mission,
+                validated,
+                governance,
+                workspace.settings,
+                decision_id=decision_id,
+            )
+            if record.status == ApprovalStatus.APPROVED:
+                enacted = await self._consume_approved(workspace, record)
+                return "done" if enacted else "replan"
+            apply_waiting_state(mission, record)
+            await workspace.persist()
+            raise WaitingForApproval(record.approval_id, mission.mission_id)
+        return "execute"
+
+    async def _resume_resolved_approval(self, workspace) -> bool | None:
+        if self._approval_repository is None:
+            return None
+        mission = workspace.mission
+        if not mission.pending_approval_id:
+            return None
+        from atlas.ops.governance.events import append_governance_event
+        from atlas.ops.governance.lifecycle import (
+            apply_waiting_state,
+            maybe_expire,
+            record_rejected_action,
+        )
+
+        record = await self._approval_repository.get(mission.pending_approval_id)
+        if record is None:
+            mission.pending_approval_id = None
+            return None
+        previous = record.status
+        record = maybe_expire(record)
+        if record.status == ApprovalStatus.EXPIRED and previous == ApprovalStatus.PENDING:
+            await self._approval_repository.upsert(record)
+            append_governance_event(
+                mission,
+                verdict=GovernanceVerdict.REQUIRE_APPROVAL,
+                risk=record.risk,
+                reason="Approval request expired",
+                fingerprint=record.fingerprint,
+                decision_id=record.decision_id,
+                approval_id=record.approval_id,
+                resolver="system",
+                new_status=ApprovalStatus.EXPIRED,
+                previous_status=ApprovalStatus.PENDING,
+                event_type=EventType.APPROVAL_EXPIRED,
+            )
+        if record.status == ApprovalStatus.PENDING:
+            apply_waiting_state(mission, record)
+            await workspace.persist()
+            raise WaitingForApproval(record.approval_id, mission.mission_id)
+        if record.status == ApprovalStatus.APPROVED:
+            return await self._consume_approved(workspace, record)
+        if record.status in {
+            ApprovalStatus.REJECTED,
+            ApprovalStatus.EXPIRED,
+            ApprovalStatus.CANCELLED,
+        }:
+            if record.status == ApprovalStatus.REJECTED:
+                record_rejected_action(mission, record)
+            mission.pending_approval_id = None
+            await workspace.persist()
+            return False
+        if record.status == ApprovalStatus.CONSUMED:
+            mission.pending_approval_id = None
+            return None
+        return None
+
+    async def _consume_approved(self, workspace, record) -> bool:
+        from atlas.domain.models import utc_now
+        from atlas.ops.decisions import parse_model_decision, validate_decision
+        from atlas.ops.governance.events import append_governance_event
+        from atlas.ops.governance.lifecycle import approval_fingerprint
+
+        mission = workspace.mission
+        try:
+            decision = parse_model_decision(record.decision_snapshot)
+            validated = validate_decision(decision, workspace, registry=self._registry)
+        except ModelDecisionError as exc:
+            logger.warning(
+                "Approved snapshot failed re-validation mission=%s: %s",
+                mission.mission_id,
+                exc,
+            )
+            mission.pending_approval_id = None
+            return False
+        expected = approval_fingerprint(mission.mission_id, validated.fingerprint)
+        if expected != record.fingerprint:
+            mission.pending_approval_id = None
+            return False
+        source = PlannerSource.LOCAL_FALLBACK
+        for item in reversed(mission.reasoning_trace):
+            if record.decision_id and item.decision_id == record.decision_id:
+                source = item.source
+                break
+        record.status = ApprovalStatus.CONSUMED
+        record.consumed_at = utc_now()
+        await self._approval_repository.upsert(record)
+        mission.pending_approval_id = None
+        append_governance_event(
+            mission,
+            verdict=GovernanceVerdict.REQUIRE_APPROVAL,
+            risk=record.risk,
+            reason="Approved operation resumed",
+            fingerprint=record.fingerprint,
+            decision_id=record.decision_id,
+            approval_id=record.approval_id,
+            resolver=record.resolver,
+            resolver_source=record.resolver_source,
+            previous_status=ApprovalStatus.APPROVED,
+            new_status=ApprovalStatus.CONSUMED,
+            event_type=EventType.APPROVAL_RESUMED,
+        )
+        _add_event(
+            mission,
+            EventType.APPROVAL_CONSUMED,
+            "Approved operation consumed exactly once",
+            {"approval_id": record.approval_id, "fingerprint": record.fingerprint},
+        )
+        return await self._enact_validated(workspace, validated, source)
+
+    async def _enact_validated(self, workspace, validated, source) -> bool:
+        mission = workspace.mission
+        plan = mission.delegation_plan
+        assert plan is not None
         if validated.decision.decision == ModelDecisionKind.COMPLETE:
             _add_event(
                 mission,
@@ -540,6 +756,28 @@ class Supervisor:
                 "Memory retrieval failed mission=%s", workspace.mission.mission_id
             )
             workspace.retrieved_memories = []
+
+    async def _refresh_strategies(self, workspace: MissionWorkspace) -> None:
+        if self._strategy_retriever is None or not workspace.settings.strategy_enabled:
+            return
+        try:
+            records = await self._strategy_retriever.retrieve_for_mission(workspace.mission)
+            workspace.retrieved_strategies = records
+            ids = [item.strategy_id for item in records]
+            first = not workspace.mission.strategy_ids_considered and bool(ids)
+            workspace.mission.strategy_ids_considered = ids
+            if first:
+                _add_event(
+                    workspace.mission,
+                    EventType.STRATEGY_RETRIEVED,
+                    "Historical strategies retrieved for reasoning",
+                    {"count": len(records), "strategy_ids": ids},
+                )
+        except Exception:
+            logger.exception(
+                "Strategy retrieval failed mission=%s", workspace.mission.mission_id
+            )
+            workspace.retrieved_strategies = []
 
     async def _execute_external_decision(self, workspace, decision, source) -> None:
         from atlas.ops.external.executor import ExternalToolExecutor

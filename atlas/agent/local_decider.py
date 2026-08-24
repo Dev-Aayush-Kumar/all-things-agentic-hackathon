@@ -17,6 +17,7 @@ from atlas.domain.models import (
 from atlas.ops.actions.policy import propose_action_follow_ups
 from atlas.ops.external.policy import propose_external_follow_up
 from atlas.ops.memory.influence import memory_follow_ups
+from atlas.ops.learning.influence import strategy_follow_ups
 from atlas.ops.planning import (
     observe_follow_ups,
     synthesis_follow_up,
@@ -117,6 +118,25 @@ class LocalDecisionMaker:
                         inputs=dict(item.arguments),
                     )
                     for item in remembered
+                ],
+            )
+
+        historic = [
+            item
+            for item in strategy_follow_ups(workspace)
+            if not task_exists(plan, item.capability, item.arguments)
+        ]
+        if historic:
+            return ModelDecision(
+                decision=ModelDecisionKind.DELEGATE,
+                reason=historic[0].reason or "Historical strategy suggests additional measurement",
+                tasks=[
+                    ProposedTask(
+                        capability=item.capability,
+                        objective=item.objective,
+                        inputs=dict(item.arguments),
+                    )
+                    for item in historic
                 ],
             )
 

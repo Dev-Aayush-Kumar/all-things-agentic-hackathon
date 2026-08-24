@@ -11,18 +11,25 @@ from atlas.domain.enums import (
     ActionStatus,
     AgentPhase,
     AgentRole,
+    ApprovalResolverSource,
+    ApprovalStatus,
     EventType,
     EvidenceSourceType,
     ExecutionState,
+    ExperienceOutcome,
     ExternalAuthorizationMode,
     ExternalInvocationStatus,
     FindingCategory,
+    GovernanceVerdict,
     MemoryExtractionSource,
     MemoryScope,
     MemoryType,
+    MissingnessBucket,
+    MissionCategory,
     MissionStatus,
     ModelDecisionKind,
     PlannerSource,
+    RowCountBucket,
     Severity,
     StepStatus,
 )
@@ -586,6 +593,194 @@ class MemoryListResponse(BaseModel):
     count: int
 
 
+class DatasetSignature(BaseModel):
+    """Structural dataset fingerprint. Never includes cell values or file bytes."""
+
+    column_names: list[str] = Field(default_factory=list)
+    column_types: list[str] = Field(default_factory=list)
+    row_bucket: RowCountBucket = RowCountBucket.S
+    has_numeric: bool = False
+    has_categorical: bool = False
+    missingness: MissingnessBucket = MissingnessBucket.NONE
+    fingerprint: str = ""
+
+
+class DatasetCharacteristics(BaseModel):
+    """Reusable dataset traits for strategy matching. No column names or values."""
+
+    has_numeric: bool = False
+    has_categorical: bool = False
+    missingness: MissingnessBucket = MissingnessBucket.NONE
+    row_bucket: RowCountBucket = RowCountBucket.S
+
+
+class ExperienceRecord(BaseModel):
+    """Compact evaluated outcome of one mission. Not a state dump."""
+
+    experience_id: str = Field(default_factory=lambda: str(uuid4()))
+    mission_id: str
+    dataset_signature: DatasetSignature
+    goal_signature: str
+    mission_category: MissionCategory
+    strategy_signature: str
+    strategy_steps: list[str] = Field(default_factory=list)
+    tools_used: list[str] = Field(default_factory=list)
+    specialists_used: list[str] = Field(default_factory=list)
+    actions_used: list[str] = Field(default_factory=list)
+    external_tools_used: list[str] = Field(default_factory=list)
+    outcome: ExperienceOutcome
+    success_score: float
+    efficiency_score: float
+    evidence_score: float
+    iterations: int = 0
+    tool_calls: int = 0
+    model_calls: int = 0
+    specialist_tasks: int = 0
+    actions: int = 0
+    failures: int = 0
+    fingerprint: str
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class ExperienceRecordPublic(BaseModel):
+    """Safe experience projection. No raw dataset content."""
+
+    experience_id: str
+    mission_id: str
+    mission_category: MissionCategory
+    strategy_signature: str
+    strategy_steps: list[str]
+    outcome: ExperienceOutcome
+    success_score: float
+    efficiency_score: float
+    evidence_score: float
+    iterations: int
+    tool_calls: int
+    model_calls: int
+    specialist_tasks: int
+    failures: int
+    created_at: datetime
+
+
+class StrategyRecord(BaseModel):
+    """Aggregated historical approach. Advisory data, never executable code."""
+
+    strategy_id: str = Field(default_factory=lambda: str(uuid4()))
+    fingerprint: str
+    mission_category: MissionCategory
+    dataset_characteristics: DatasetCharacteristics
+    recommended_capabilities: list[str] = Field(default_factory=list)
+    historical_runs: int = 0
+    success_rate: float = 0.0
+    average_efficiency: float = 0.0
+    average_evidence_score: float = 0.0
+    confidence: float = 0.0
+    failure_count: int = 0
+    supporting_mission_ids: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class StrategyRecordPublic(BaseModel):
+    """Safe strategy projection for API clients."""
+
+    strategy_id: str
+    mission_category: MissionCategory
+    dataset_characteristics: DatasetCharacteristics
+    recommended_capabilities: list[str]
+    historical_runs: int
+    success_rate: float
+    average_efficiency: float
+    average_evidence_score: float
+    confidence: float
+    created_at: datetime
+    updated_at: datetime
+
+
+class StrategyListResponse(BaseModel):
+    """Bounded strategy listing."""
+
+    items: list[StrategyRecordPublic]
+    count: int
+
+
+class GovernanceEvent(BaseModel):
+    """Audit record for a policy or approval transition. Not model chain-of-thought."""
+
+    event_id: str = Field(default_factory=lambda: str(uuid4()))
+    decision_id: str | None = None
+    approval_id: str | None = None
+    verdict: GovernanceVerdict
+    risk: ActionRisk
+    fingerprint: str = ""
+    resolver: str | None = None
+    resolver_source: ApprovalResolverSource | None = None
+    previous_status: ApprovalStatus | None = None
+    new_status: ApprovalStatus | None = None
+    reason: str = ""
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class ApprovalRequest(BaseModel):
+    """Durable human-approval request. Never includes secrets or raw datasets."""
+
+    approval_id: str = Field(default_factory=lambda: str(uuid4()))
+    mission_id: str
+    execution_id: str | None = None
+    decision_id: str | None = None
+    requested_operation: str
+    operation_kind: ModelDecisionKind
+    capability: str
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    reason: str = ""
+    risk: ActionRisk = ActionRisk.MEDIUM
+    policy_verdict: GovernanceVerdict = GovernanceVerdict.REQUIRE_APPROVAL
+    status: ApprovalStatus = ApprovalStatus.PENDING
+    fingerprint: str
+    decision_snapshot: dict[str, Any] = Field(default_factory=dict)
+    requested_at: datetime = Field(default_factory=utc_now)
+    expires_at: datetime
+    resolved_at: datetime | None = None
+    consumed_at: datetime | None = None
+    resolver: str | None = None
+    resolver_source: ApprovalResolverSource | None = None
+    rejection_reason: str | None = None
+    dispatched_at: datetime | None = None
+
+
+class ApprovalRequestPublic(BaseModel):
+    """Safe approval projection for API clients."""
+
+    approval_id: str
+    mission_id: str
+    decision_id: str | None = None
+    requested_operation: str
+    operation_kind: ModelDecisionKind
+    capability: str
+    parameters: dict[str, Any]
+    reason: str
+    risk: ActionRisk
+    policy_verdict: GovernanceVerdict
+    status: ApprovalStatus
+    fingerprint: str
+    requested_at: datetime
+    expires_at: datetime
+    resolved_at: datetime | None = None
+    resolver: str | None = None
+    rejection_reason: str | None = None
+
+
+class ApprovalListResponse(BaseModel):
+    items: list[ApprovalRequestPublic]
+    count: int
+
+
+class ApprovalResolveRequest(BaseModel):
+    """Approve or reject without changing the operation."""
+
+    resolver: str = "human"
+
+
 class ExternalInvocationPublic(BaseModel):
     """Safe external-invocation projection. No headers, cookies, or secrets."""
 
@@ -666,6 +861,7 @@ class MissionExecution(BaseModel):
     attempt_count: int = 0
     max_attempts: int = 3
     last_error: str | None = None
+    resume_without_attempt: bool = False
 
     def is_claimed(self, now: datetime | None = None) -> bool:
         """Whether a worker currently holds a valid lease."""
@@ -729,6 +925,10 @@ class Mission(BaseModel):
     reasoning_trace: list[DecisionRecord] = Field(default_factory=list)
     reasoning_iteration: int = 0
     model_call_count: int = 0
+    strategy_ids_considered: list[str] = Field(default_factory=list)
+    strategy_ids_influenced: list[str] = Field(default_factory=list)
+    pending_approval_id: str | None = None
+    governance_events: list[GovernanceEvent] = Field(default_factory=list)
     external_invocations: list[ExternalInvocation] = Field(default_factory=list)
     events: list[MissionEvent] = Field(default_factory=list)
     execution: MissionExecution = Field(default_factory=MissionExecution)
@@ -780,6 +980,10 @@ class MissionDetailResponse(BaseModel):
     working_copy: WorkingCopyPublic | None = None
     reasoning_trace: list[DecisionRecordPublic] = Field(default_factory=list)
     external_invocations: list[ExternalInvocationPublic] = Field(default_factory=list)
+    strategy_ids_considered: list[str] = Field(default_factory=list)
+    strategy_ids_influenced: list[str] = Field(default_factory=list)
+    pending_approval: ApprovalRequestPublic | None = None
+    governance_events: list[GovernanceEvent] = Field(default_factory=list)
     events: list[MissionEvent]
     execution: MissionExecutionPublic | None = None
     created_at: datetime
@@ -809,6 +1013,9 @@ class MissionDetailResponse(BaseModel):
             working_copy=public_working_copy(mission.working_copy),
             reasoning_trace=[public_decision(item) for item in mission.reasoning_trace],
             external_invocations=[public_external_invocation(item) for item in mission.external_invocations],
+            strategy_ids_considered=list(mission.strategy_ids_considered),
+            strategy_ids_influenced=list(mission.strategy_ids_influenced),
+            governance_events=list(mission.governance_events),
             events=mission.events,
             execution=MissionExecutionPublic.from_execution(mission.execution),
             created_at=mission.created_at,
@@ -816,6 +1023,28 @@ class MissionDetailResponse(BaseModel):
             completed_at=mission.completed_at,
             error=mission.error,
         )
+
+
+def public_approval(record: ApprovalRequest) -> ApprovalRequestPublic:
+    return ApprovalRequestPublic(
+        approval_id=record.approval_id,
+        mission_id=record.mission_id,
+        decision_id=record.decision_id,
+        requested_operation=record.requested_operation,
+        operation_kind=record.operation_kind,
+        capability=record.capability,
+        parameters=dict(record.parameters),
+        reason=record.reason,
+        risk=record.risk,
+        policy_verdict=record.policy_verdict,
+        status=record.status,
+        fingerprint=record.fingerprint,
+        requested_at=record.requested_at,
+        expires_at=record.expires_at,
+        resolved_at=record.resolved_at,
+        resolver=record.resolver,
+        rejection_reason=record.rejection_reason,
+    )
 
 
 def public_action(record: ActionRecord) -> ActionSummary:

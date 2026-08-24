@@ -25,6 +25,10 @@ def is_claimable(mission: Mission, now: datetime) -> bool:
         return False
     if mission.execution.state in TERMINAL_EXECUTION:
         return False
+    if mission.execution.state == ExecutionState.WAITING_FOR_APPROVAL:
+        return False
+    if mission.status == MissionStatus.WAITING_FOR_APPROVAL:
+        return False
     if mission.execution.attempt_count >= mission.execution.max_attempts:
         return False
     if mission.execution.state == ExecutionState.QUEUED:
@@ -40,6 +44,10 @@ def is_recoverable(mission: Mission, now: datetime) -> bool:
     if mission.status in TERMINAL_LIFECYCLE:
         return False
     if mission.execution.state in TERMINAL_EXECUTION:
+        return False
+    if mission.execution.state == ExecutionState.WAITING_FOR_APPROVAL:
+        return False
+    if mission.status == MissionStatus.WAITING_FOR_APPROVAL:
         return False
     if mission.execution.state == ExecutionState.QUEUED:
         return False
@@ -75,7 +83,10 @@ def apply_claim(
     mission.execution.claimed_at = current
     mission.execution.lease_expires_at = expires
     mission.execution.heartbeat_at = current
-    mission.execution.attempt_count += 1
+    if mission.execution.resume_without_attempt:
+        mission.execution.resume_without_attempt = False
+    else:
+        mission.execution.attempt_count += 1
     mission.execution.last_error = None
     mission.events.append(
         MissionEvent(
