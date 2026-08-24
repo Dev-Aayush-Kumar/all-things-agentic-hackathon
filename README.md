@@ -212,6 +212,8 @@ Transports:
 - Gemini API: `GOOGLE_API_KEY`
 - Vertex AI: `GOOGLE_GENAI_USE_VERTEXAI=true` and `GOOGLE_CLOUD_PROJECT`
 
+Outbound Gemini TLS uses the **native OS certificate store** via `truststore` (injected at ATLAS process start). This avoids Python/httpx `CERTIFICATE_VERIFY_FAILED` on Windows when certifi does not include the local issuer. Certificate verification stays enabled; ATLAS does not set `verify=False` or `SSL_CERT_FILE`. Local fallback still runs when Gemini credentials are absent.
+
 `GET /health` reports `planner_label`, `gemini_model`, and `gemini_transport`. It never includes API keys.
 
 ## Mission lifecycle vs execution state

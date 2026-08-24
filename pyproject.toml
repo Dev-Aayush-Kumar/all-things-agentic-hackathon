@@ -3,6 +3,9 @@ name = "atlas"
 version = "0.12.0"
 description = "ATLAS - Autonomous operations agent for Google All Things Agentic Hackathon 2026"
 requires-python = ">=3.10"
+dependencies = [
+    "truststore>=0.10.4",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -11,6 +11,7 @@ python-dotenv>=1.0.0
 aiosqlite>=0.20.0
 python-multipart>=0.0.9
 pandas>=2.2.0
+truststore>=0.10.4
 
 # Development / testing
 pytest>=8.3.0
