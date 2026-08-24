@@ -10,7 +10,7 @@ from atlas.agent.reasoner_base import InvestigationReasoner
 from atlas.agent.tools import ToolContext, ToolResult
 from atlas.config.settings import Settings
 from atlas.domain.enums import PlannerSource
-from atlas.domain.models import DatasetProfile, Mission
+from atlas.domain.models import DatasetProfile, MemoryRecord, Mission
 from atlas.ops.registry import AgentRegistry
 from atlas.storage.base import DatasetStorage
 
@@ -33,6 +33,7 @@ class MissionWorkspace:
     inspected_columns: set[str] = field(default_factory=set)
     step_delay_seconds: float = 0.0
     dataset_storage: DatasetStorage | None = None
+    retrieved_memories: list[MemoryRecord] = field(default_factory=list)
 
     @property
     def profile(self) -> DatasetProfile | None:

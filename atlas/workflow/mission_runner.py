@@ -39,6 +39,7 @@ class MissionWorkflowRunner:
         reasoner: InvestigationReasoner | None = None,
         settings: Settings | None = None,
         step_delay_seconds: float = 0.0,
+        memory_repository=None,
     ) -> None:
         self._repository = repository
         self._planner = planner
@@ -48,6 +49,7 @@ class MissionWorkflowRunner:
         self._reasoner = reasoner
         self._settings = settings
         self._step_delay_seconds = step_delay_seconds
+        self._memory_repository = memory_repository
 
     async def run(
         self,
@@ -217,6 +219,12 @@ class MissionWorkflowRunner:
                 mission.goal, self._settings
             )
 
+        memory_retriever = None
+        if self._memory_repository is not None and self._settings.memory_enabled:
+            from atlas.ops.memory.retrieve import MemoryRetriever
+
+            memory_retriever = MemoryRetriever(self._memory_repository, self._settings)
+
         supervisor = Supervisor(
             reasoner=self._reasoner,
             settings=self._settings,
@@ -225,6 +233,7 @@ class MissionWorkflowRunner:
             step_delay_seconds=self._step_delay_seconds,
             dataset_storage=self._dataset_storage,
             decision_maker=decision_maker,
+            memory_retriever=memory_retriever,
         )
         context = ToolContext(
             dataset_id=dataset.dataset_id,
@@ -237,6 +246,7 @@ class MissionWorkflowRunner:
             await self._persist(mission)
 
         await supervisor.run(mission, context, persist)
+        await self._extract_memory(mission)
 
     async def _fail_mission(self, mission: Mission, error: str) -> None:
         mission.status = MissionStatus.FAILED
@@ -262,6 +272,44 @@ class MissionWorkflowRunner:
             {"error": error},
         )
         await self._persist(mission)
+
+    async def _extract_memory(self, mission: Mission) -> None:
+        if self._memory_repository is None or self._settings is None:
+            return
+        if not self._settings.memory_enabled:
+            return
+        self._add_event(
+            mission,
+            EventType.MEMORY_EXTRACTION_STARTED,
+            "Post-completion memory extraction started",
+            {},
+        )
+        try:
+            from atlas.agent.factory import create_memory_extractor
+            from atlas.ops.memory.extract import extract_and_store
+
+            extractor = create_memory_extractor(self._settings)
+            stored = await extract_and_store(
+                mission,
+                self._memory_repository,
+                self._settings,
+                extractor=extractor,
+            )
+            logger.info(
+                "Memory extraction stored %s record(s) for mission %s",
+                len(stored),
+                mission.mission_id,
+            )
+        except Exception as exc:
+            logger.exception(
+                "Memory extraction failed for mission %s", mission.mission_id
+            )
+            self._add_event(
+                mission,
+                EventType.MEMORY_EXTRACTION_FAILED,
+                "Memory extraction failed",
+                {"error": str(exc)},
+            )
 
     async def _persist(self, mission: Mission) -> None:
         context = _execution_context.get()

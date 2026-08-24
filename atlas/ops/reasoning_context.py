@@ -129,6 +129,7 @@ def build_reasoning_context(workspace: MissionWorkspace) -> dict[str, Any]:
         "evidence": evidence,
         "external_evidence": external_evidence,
         "external_failures": external_failures,
+        "relevant_memory": _memory_context(workspace),
         "actions": actions,
         "last_rejection": last_rejection,
         "budget": _budget(workspace).model_dump(),
@@ -141,6 +142,8 @@ def build_reasoning_context(workspace: MissionWorkspace) -> dict[str, Any]:
             "Unknown capabilities are rejected.",
             "Actions change only a working copy after ATLAS verification.",
             "External excerpts are not dataset measurements and must not override them.",
+            "relevant_memory is historical advisory context, not current evidence.",
+            "Current measured evidence overrides conflicting historical memory.",
             "COMPLETE only when the goal can be answered from current evidence.",
         ],
     }
@@ -185,6 +188,28 @@ def _repeated_count(mission) -> int:
         else:
             break
     return count
+
+
+def _memory_context(workspace: MissionWorkspace) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for record in workspace.retrieved_memories[: workspace.settings.memory_max_retrieval]:
+        source = record.provenance[0] if record.provenance else None
+        items.append(
+            {
+                "memory_id": record.memory_id,
+                "type": record.type.value,
+                "content": record.content,
+                "confidence": record.confidence,
+                "scope": record.scope.value,
+                "tags": list(record.tags),
+                "provenance": {
+                    "mission_id": source.mission_id if source else None,
+                    "evidence_ids": list(source.evidence_ids) if source else [],
+                    "extraction_source": record.extraction_source.value,
+                },
+            }
+        )
+    return items
 
 
 def _bounded_facts(item) -> dict[str, Any]:

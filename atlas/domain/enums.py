@@ -130,6 +130,11 @@ class EventType(str, Enum):
     EXTERNAL_TOOL_COMPLETED = "EXTERNAL_TOOL_COMPLETED"
     EXTERNAL_TOOL_FAILED = "EXTERNAL_TOOL_FAILED"
     EXTERNAL_TOOL_REJECTED = "EXTERNAL_TOOL_REJECTED"
+    MEMORY_EXTRACTION_STARTED = "MEMORY_EXTRACTION_STARTED"
+    MEMORY_EXTRACTED = "MEMORY_EXTRACTED"
+    MEMORY_MERGED = "MEMORY_MERGED"
+    MEMORY_REJECTED = "MEMORY_REJECTED"
+    MEMORY_EXTRACTION_FAILED = "MEMORY_EXTRACTION_FAILED"
     FINAL_REASONING_COMPLETED = "FINAL_REASONING_COMPLETED"
     MISSION_COMPLETED = "MISSION_COMPLETED"
     MISSION_FAILED = "MISSION_FAILED"
@@ -192,6 +197,31 @@ class ExternalInvocationStatus(str, Enum):
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     REJECTED = "REJECTED"
+
+
+class MemoryType(str, Enum):
+    """Explicit memory categories. Not a dump of mission transcripts."""
+
+    FACT = "FACT"
+    PROCEDURE = "PROCEDURE"
+    INSIGHT = "INSIGHT"
+    PREFERENCE = "PREFERENCE"
+
+
+class MemoryScope(str, Enum):
+    """Where a memory may be reused."""
+
+    MISSION = "MISSION"
+    DATASET = "DATASET"
+    GLOBAL = "GLOBAL"
+
+
+class MemoryExtractionSource(str, Enum):
+    """Who proposed the memory. Persistence is always ATLAS."""
+
+    LOCAL_FALLBACK = "LOCAL_FALLBACK"
+    GEMINI_ADK = "GEMINI_ADK"
+    DETERMINISTIC_EVIDENCE = "DETERMINISTIC_EVIDENCE"
 
 
 class ExternalAuthorizationMode(str, Enum):

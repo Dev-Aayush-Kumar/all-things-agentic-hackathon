@@ -7,7 +7,12 @@ from atlas.config.settings import DispatcherBackend, Settings, get_settings
 from atlas.execution.factory import create_dispatcher
 from atlas.execution.recovery import MissionRecoveryService
 from atlas.execution.worker import MissionWorker
-from atlas.persistence.factory import create_dataset_repository, create_mission_repository
+from atlas.persistence.factory import (
+    create_dataset_repository,
+    create_memory_repository,
+    create_mission_repository,
+)
+from atlas.services.memory_service import MemoryService
 from atlas.services.dataset_service import DatasetService
 from atlas.services.mission_service import MissionService
 from atlas.storage.factory import create_dataset_storage
@@ -32,7 +37,14 @@ def _build_workflow_runner(settings: Settings) -> MissionWorkflowRunner:
         reasoner=create_investigation_reasoner(settings),
         settings=settings,
         step_delay_seconds=settings.step_execution_delay_seconds,
+        memory_repository=create_memory_repository(settings),
     )
+
+
+@lru_cache
+def get_memory_service() -> MemoryService:
+    settings = get_app_settings()
+    return MemoryService(create_memory_repository(settings))
 
 
 @lru_cache

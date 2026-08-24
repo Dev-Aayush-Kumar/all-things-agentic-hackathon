@@ -4,7 +4,7 @@
 
 ATLAS is an autonomous operations agent built for the Google All Things Agentic Hackathon 2026. It accepts a high-level goal, plans work, investigates uploaded CSV datasets with allowlisted tools, can apply **controlled remediations** to a working copy, and produces an evidence-based report.
 
-Round 9 adds a **controlled external tool layer**. The model may propose `FETCH_URL`; ATLAS validates, authorizes, and executes the registered implementation. Dataset-only missions still work without any network call. Rounds 5–8 remain.
+Round 10 adds **persistent memory**: after a mission completes, ATLAS extracts structured knowledge, stores it, and can retrieve a bounded set into later reasoning. Memory is advisory. Current evidence wins. Rounds 5–9 remain.
 
 ## Problem
 
@@ -620,6 +620,59 @@ If that flag is unset, those tests are skipped.
 - Local fallback proposes `FETCH_URL` only for an allowlisted URL found in the goal
 - Events: `EXTERNAL_TOOL_PROPOSED` … `EXTERNAL_TOOL_REJECTED`
 
+### Round 10
+
+- Explicit `MemoryRecord` (FACT / PROCEDURE / INSIGHT / PREFERENCE) with provenance, scope, confidence, and fingerprint
+- Post-completion extraction: local deterministic extractor, or Gemini proposals that ATLAS validates before persist
+- SQLite and Firestore repositories; retrieval is bounded lexical/tag overlap (no vector DB)
+- `relevant_memory` is a separate reasoning-context section and is never current evidence
+- Local fallback can select extra allowlisted observations because of retrieved PROCEDURE/INSIGHT memories
+- `GET /memory` and `GET /memory/{id}` for inspection
+- Events: `MEMORY_EXTRACTION_STARTED`, `MEMORY_EXTRACTED`, `MEMORY_MERGED`, `MEMORY_REJECTED`, `MEMORY_EXTRACTION_FAILED`
+
+## Memory
+
+ATLAS memory is **not** a transcript dump and **not** a RAG platform.
+
+```
+Mission A completes
+        ↓
+Extractor proposes typed memories
+        ↓
+ATLAS validates (type, provenance, size, secrets, metadata)
+        ↓
+Fingerprint dedupe / merge
+        ↓
+SQLite or Firestore
+        ↓
+Mission B retrieves a bounded set
+        ↓
+relevant_memory in reasoning context
+        ↓
+Decision maker may propose extra allowlisted work
+        ↓
+Existing validation still applies
+```
+
+| Kind | Meaning |
+|------|---------|
+| FACT | Dataset- or mission-scoped observation (not a universal rule) |
+| PROCEDURE | Reusable investigation habit |
+| INSIGHT | Reusable interpretation, still advisory |
+| PREFERENCE | Supported but not auto-extracted in this round |
+
+**Confidence policy:** deterministic evidence 0.80; local insight/procedure 0.70; Gemini proposals capped at 0.55. A new supporting mission adds 0.05, max 0.95. This is an explicit policy, not model-reported truth.
+
+**Scope:** FACT is never global. GLOBAL is only for PROCEDURE/INSIGHT. A finding about one CSV does not become “all age columns everywhere.”
+
+**Retrieval:** token/tag overlap plus scope filters. Limit `ATLAS_MEMORY_MAX_RETRIEVAL`. A future embedding backend can replace `MemoryRetriever` without changing the supervisor.
+
+**Safety:** memory text is never a tool definition. `EXECUTE_SHELL` in a memory cannot execute. Invalid arguments (missing columns, unknown tools) still fail validation. Current measurements override conflicting history.
+
+Gemini may propose memories when configured. It cannot write SQLite/Firestore or skip validation. Local extraction is labeled `LOCAL_FALLBACK` / `DETERMINISTIC_EVIDENCE`.
+
+Vector search is intentionally omitted: the vertical slice is durable, inspectable, and cheap.
+
 ## Optional / future
 
 These are **not** implemented in this round:
@@ -650,6 +703,8 @@ These are **not** implemented in this round:
 - Delegation is in-process in the mission worker (local asyncio or the Cloud Run worker). There is no separate specialist fleet
 - Default tests always force local fallback and do not call paid APIs
 - Live Google Cloud verification depends on credentials in the environment running the tests
+- Memory retrieval is lexical, not semantic; similar phrasing may miss a relevant memory
+- Memory extraction is post-completion enrichment and does not fail the mission if it errors
 
 ## License
 

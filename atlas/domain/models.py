@@ -17,6 +17,9 @@ from atlas.domain.enums import (
     ExternalAuthorizationMode,
     ExternalInvocationStatus,
     FindingCategory,
+    MemoryExtractionSource,
+    MemoryScope,
+    MemoryType,
     MissionStatus,
     ModelDecisionKind,
     PlannerSource,
@@ -517,6 +520,70 @@ class ExternalInvocation(BaseModel):
     error: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     completed_at: datetime | None = None
+
+
+class MemoryProvenance(BaseModel):
+    """Why ATLAS believes a memory. Never includes credentials or prompts."""
+
+    mission_id: str
+    evidence_ids: list[str] = Field(default_factory=list)
+    finding_ids: list[str] = Field(default_factory=list)
+    source_type: MemoryExtractionSource
+    extracted_at: datetime = Field(default_factory=utc_now)
+
+
+class MemoryProposal(BaseModel):
+    """Structured candidate memory. The model cannot persist this itself."""
+
+    type: MemoryType
+    content: str
+    scope: MemoryScope = MemoryScope.DATASET
+    tags: list[str] = Field(default_factory=list)
+    confidence: float | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    evidence_ids: list[str] = Field(default_factory=list)
+    finding_ids: list[str] = Field(default_factory=list)
+
+
+class MemoryRecord(BaseModel):
+    """Durable knowledge extracted from a completed mission."""
+
+    memory_id: str = Field(default_factory=lambda: str(uuid4()))
+    fingerprint: str
+    type: MemoryType
+    content: str
+    scope: MemoryScope
+    scope_ref: str = ""
+    tags: list[str] = Field(default_factory=list)
+    confidence: float
+    provenance: list[MemoryProvenance] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    extraction_source: MemoryExtractionSource
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class MemoryRecordPublic(BaseModel):
+    """Safe memory projection for API clients."""
+
+    memory_id: str
+    type: MemoryType
+    content: str
+    scope: MemoryScope
+    scope_ref: str
+    tags: list[str]
+    confidence: float
+    provenance: list[MemoryProvenance]
+    extraction_source: MemoryExtractionSource
+    created_at: datetime
+    updated_at: datetime
+
+
+class MemoryListResponse(BaseModel):
+    """Bounded memory listing."""
+
+    items: list[MemoryRecordPublic]
+    count: int
 
 
 class ExternalInvocationPublic(BaseModel):

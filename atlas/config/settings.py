@@ -163,6 +163,15 @@ class Settings(BaseSettings):
     fetch_allow_loopback: bool = Field(
         default=False, alias="ATLAS_FETCH_ALLOW_LOOPBACK"
     )
+    memory_enabled: bool = Field(default=True, alias="ATLAS_MEMORY_ENABLED")
+    memory_max_retrieval: int = Field(default=5, alias="ATLAS_MEMORY_MAX_RETRIEVAL")
+    memory_max_extract: int = Field(default=8, alias="ATLAS_MEMORY_MAX_EXTRACT")
+    memory_min_confidence: float = Field(
+        default=0.4, alias="ATLAS_MEMORY_MIN_CONFIDENCE"
+    )
+    memory_content_max_chars: int = Field(
+        default=800, alias="ATLAS_MEMORY_CONTENT_MAX_CHARS"
+    )
 
     # Durable execution
     worker_id: str | None = Field(default=None, alias="ATLAS_WORKER_ID")
@@ -310,6 +319,7 @@ class Settings(BaseSettings):
             "adk_configured": self.adk_configured,
             "external_tools_enabled": self.external_tools_enabled,
             "fetch_url_enabled": self.fetch_url_enabled,
+            "memory_enabled": self.memory_enabled,
         }
 
 

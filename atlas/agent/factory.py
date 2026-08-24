@@ -99,3 +99,19 @@ def create_decision_maker(settings: Settings):
         return AdkDecisionMaker(settings)
     logger.info("Using LOCAL_FALLBACK supervisor decision-maker")
     return LocalDecisionMaker()
+
+
+def create_memory_extractor(settings: Settings):
+    """Create a memory proposer. Local fallback is never labeled Gemini."""
+    from atlas.agent.adk_memory import AdkMemoryExtractor
+    from atlas.ops.memory.extract import LocalMemoryExtractor
+
+    backend = settings.resolved_planner_backend
+    if backend == PlannerBackend.ADK and settings.adk_configured:
+        logger.info(
+            "Using REAL_GEMINI_ADK memory extractor with model=%s",
+            settings.gemini_model,
+        )
+        return AdkMemoryExtractor(settings)
+    logger.info("Using LOCAL_FALLBACK memory extractor")
+    return LocalMemoryExtractor()

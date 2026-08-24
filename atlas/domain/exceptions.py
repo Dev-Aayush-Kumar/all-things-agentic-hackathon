@@ -94,6 +94,14 @@ class ExternalToolExecutionError(Exception):
     """Raised when a registered external tool fails during execution."""
 
 
+class MemoryValidationError(Exception):
+    """Raised when a memory proposal is malformed or not allowlisted."""
+
+
+class UnknownMemoryError(Exception):
+    """Raised when a memory id is not found."""
+
+
 class ActionExecutionError(Exception):
     """Raised when a registered action fails during execution or verification."""
 

@@ -75,6 +75,7 @@ class Supervisor:
         dataset_storage: DatasetStorage | None = None,
         decision_maker=None,
         external_executor=None,
+        memory_retriever=None,
     ) -> None:
         self._reasoner = reasoner
         self._settings = settings
@@ -88,6 +89,7 @@ class Supervisor:
         self._decision_maker = decision_maker or LocalDecisionMaker()
         self._local_fallback_decider = LocalDecisionMaker()
         self._external_executor = external_executor
+        self._memory_retriever = memory_retriever
 
     async def run(
         self,
@@ -325,6 +327,7 @@ class Supervisor:
         assert plan is not None
         mission.current_phase = AgentPhase.REASONING
         mission.reasoning_iteration += 1
+        await self._refresh_memories(workspace)
         context = build_reasoning_context(workspace)
         context["_workspace"] = workspace
         _add_event(
@@ -517,6 +520,26 @@ class Supervisor:
                 },
             )
         return True
+
+    async def _refresh_memories(self, workspace: MissionWorkspace) -> None:
+        if self._memory_retriever is None or not workspace.settings.memory_enabled:
+            return
+        from atlas.ops.memory.retrieve import MemoryQuery
+
+        try:
+            workspace.retrieved_memories = await self._memory_retriever.retrieve(
+                MemoryQuery(
+                    goal=workspace.mission.goal,
+                    dataset_id=workspace.mission.dataset_id,
+                    mission_id=workspace.mission.mission_id,
+                    limit=workspace.settings.memory_max_retrieval,
+                )
+            )
+        except Exception:
+            logger.exception(
+                "Memory retrieval failed mission=%s", workspace.mission.mission_id
+            )
+            workspace.retrieved_memories = []
 
     async def _execute_external_decision(self, workspace, decision, source) -> None:
         from atlas.ops.external.executor import ExternalToolExecutor

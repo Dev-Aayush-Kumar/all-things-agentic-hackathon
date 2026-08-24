@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from atlas.domain.models import DatasetRecord, Mission
+from atlas.domain.models import DatasetRecord, MemoryRecord, Mission
 
 
 def mission_to_document(mission: Mission) -> dict[str, Any]:
@@ -42,3 +42,25 @@ def dataset_to_document(record: DatasetRecord) -> dict[str, Any]:
 
 def document_to_dataset(document: dict[str, Any]) -> DatasetRecord:
     return DatasetRecord.model_validate(document)
+
+
+def memory_to_document(record: MemoryRecord) -> dict[str, Any]:
+    payload = record.model_dump(mode="json")
+    return {
+        "memory_id": record.memory_id,
+        "fingerprint": record.fingerprint,
+        "type": record.type.value,
+        "scope": record.scope.value,
+        "scope_ref": record.scope_ref,
+        "confidence": record.confidence,
+        "created_at": record.created_at.isoformat(),
+        "updated_at": record.updated_at.isoformat(),
+        "payload": payload,
+    }
+
+
+def document_to_memory(document: dict[str, Any]) -> MemoryRecord:
+    payload = document.get("payload")
+    if isinstance(payload, dict):
+        return MemoryRecord.model_validate(payload)
+    return MemoryRecord.model_validate(document)
