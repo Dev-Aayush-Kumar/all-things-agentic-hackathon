@@ -1,0 +1,190 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 1080" width="1180" height="1080" role="img" aria-labelledby="diagramTitle diagramDesc">
+  <title id="diagramTitle">ATLAS architecture - current implementation</title>
+  <desc id="diagramDesc">
+    User or judge calls the FastAPI API. Mission Service dispatches to a Mission Worker
+    via in-process asyncio locally or Pub/Sub when deployed. The Mission Workflow Runner
+    hosts a supervisor loop: Google ADK with Gemini 3.5 Flash proposes a typed JSON
+    decision; ATLAS validates it, applies GovernancePolicy, and executes allowlisted
+    specialist tools. Remediations require a durable human approval. Cloud Run, Firestore,
+    Cloud Storage, and Pub/Sub are implemented and deployable; this diagram does not claim
+    they are already live. Gemini never executes HTTP, shell, filesystem, or arbitrary tools.
+  </desc>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#3d4f63"/>
+    </marker>
+    <marker id="arrowTeal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1f6f64"/>
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2f6b3a"/>
+    </marker>
+    <marker id="arrowAmber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8a5a24"/>
+    </marker>
+    <marker id="arrowRed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8b2942"/>
+    </marker>
+  </defs>
+
+  <rect width="1180" height="1080" fill="#f4f6f8"/>
+
+  <text x="40" y="34" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="22" font-weight="600" fill="#1a2332">ATLAS architecture</text>
+  <text x="40" y="54" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13" fill="#5c6b7a">Current implementation. Gemini 3.5 Flash via Google ADK is the supervisor decision-maker when credentials are configured.</text>
+  <text x="40" y="72" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13" fill="#5c6b7a">Cloud Run, Firestore, Cloud Storage, and Pub/Sub are implemented and deployable, not claimed as already provisioned from this repository.</text>
+
+  <!-- 1. API -->
+  <text x="40" y="100" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" font-weight="600" letter-spacing="0.08em" fill="#5c6b7a">1. API</text>
+
+  <rect x="40" y="110" width="200" height="56" rx="6" fill="#ffffff" stroke="#3d4f63" stroke-width="1.25"/>
+  <text x="140" y="132" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#1a2332">User / Judge</text>
+  <text x="140" y="150" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" fill="#5c6b7a">upload CSV, create mission, approve</text>
+
+  <line x1="240" y1="138" x2="268" y2="138" stroke="#3d4f63" stroke-width="1.25" marker-end="url(#arrow)"/>
+
+  <rect x="270" y="110" width="870" height="56" rx="6" fill="#e8eef6" stroke="#3d5a80" stroke-width="1.25"/>
+  <text x="705" y="132" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#1a2332">FastAPI API  -  atlas.main:app</text>
+  <text x="705" y="150" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" fill="#3d4f63">Local: uvicorn on this process     |     Cloud: Cloud Run API service (implemented, deployable)</text>
+
+  <line x1="705" y1="166" x2="705" y2="186" stroke="#3d4f63" stroke-width="1.25" marker-end="url(#arrow)"/>
+
+  <!-- 2. Orchestration -->
+  <text x="40" y="206" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" font-weight="600" letter-spacing="0.08em" fill="#5c6b7a">2. ORCHESTRATION</text>
+
+  <rect x="40" y="216" width="210" height="70" rx="6" fill="#ffffff" stroke="#3d4f63" stroke-width="1.25"/>
+  <text x="145" y="240" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#1a2332">Mission Service</text>
+  <text x="145" y="258" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" fill="#5c6b7a">persist QUEUED</text>
+  <text x="145" y="274" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" fill="#5c6b7a">dispatch mission_id</text>
+
+  <line x1="250" y1="251" x2="274" y2="251" stroke="#3d4f63" stroke-width="1.25" marker-end="url(#arrow)"/>
+
+  <rect x="276" y="216" width="250" height="70" rx="6" fill="#ffffff" stroke="#3d4f63" stroke-width="1.25"/>
+  <text x="401" y="236" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#1a2332">Mission Worker</text>
+  <text x="401" y="254" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" fill="#5c6b7a">Local: in-process asyncio</text>
+  <text x="401" y="270" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" fill="#5c6b7a">Cloud: Pub/Sub to atlas.worker:app</text>
+
+  <line x1="526" y1="251" x2="550" y2="251" stroke="#3d4f63" stroke-width="1.25" marker-end="url(#arrow)"/>
+
+  <rect x="552" y="216" width="250" height="70" rx="6" fill="#ffffff" stroke="#3d4f63" stroke-width="1.25"/>
+  <text x="677" y="240" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#1a2332">Mission Workflow Runner</text>
+  <text x="677" y="258" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" fill="#5c6b7a">dataset investigation loop</text>
+  <text x="677" y="274" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" fill="#5c6b7a">claim lease, run supervisor</text>
+
+  <line x1="802" y1="251" x2="826" y2="251" stroke="#3d4f63" stroke-width="1.25" marker-end="url(#arrow)"/>
+
+  <rect x="828" y="216" width="312" height="70" rx="6" fill="#ffffff" stroke="#3d4f63" stroke-width="1.25"/>
+  <text x="984" y="240" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#1a2332">Supervisor / Decision Layer</text>
+  <text x="984" y="258" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" fill="#5c6b7a">bounded decide-validate-execute loop</text>
+  <text x="984" y="274" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" fill="#5c6b7a">in-process; no specialist fleet</text>
+
+  <line x1="984" y1="286" x2="984" y2="306" stroke="#3d4f63" stroke-width="1.25" marker-end="url(#arrow)"/>
+
+  <!-- 3. Gemini / ADK -->
+  <text x="40" y="326" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" font-weight="600" letter-spacing="0.08em" fill="#5c6b7a">3. GEMINI / GOOGLE ADK  -  PROPOSES ONLY</text>
+
+  <rect x="40" y="336" width="1100" height="88" rx="8" fill="#e6f3f0" stroke="#1f6f64" stroke-width="1.5"/>
+  <text x="590" y="362" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#1a2332">Google ADK + Gemini 3.5 Flash</text>
+  <text x="590" y="382" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" fill="#1f6f64">AdkDecisionMaker  /  google.adk.Agent  /  InMemoryRunner.run_debug  /  REAL_GEMINI_ADK</text>
+  <text x="590" y="400" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" fill="#1a2332">Typed JSON decision: DELEGATE | OBSERVE | ACTION | EXTERNAL | COMPLETE</text>
+  <text x="590" y="416" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" fill="#3d4f63">Does not execute tools, HTTP, shell, filesystem, or FunctionTools. Local fallback is labeled LOCAL_FALLBACK, never Gemini.</text>
+
+  <line x1="590" y1="424" x2="590" y2="448" stroke="#8b2942" stroke-width="1.75" marker-end="url(#arrowRed)"/>
+
+  <!-- 4. ATLAS safety boundary -->
+  <text x="56" y="468" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" font-weight="700" letter-spacing="0.06em" fill="#8b2942">4. ATLAS SAFETY BOUNDARY  -  VALIDATES, GOVERNS, AND CONTROLS EXECUTION</text>
+
+  <rect x="40" y="478" width="1100" height="286" rx="10" fill="#fdf8f9" stroke="#8b2942" stroke-width="2.25" stroke-dasharray="7 4"/>
+
+  <text x="590" y="500" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13" font-weight="700" fill="#8b2942">Gemini/ADK decides WHAT should happen. ATLAS decides WHETHER it may run and HOW it executes.</text>
+
+  <rect x="56" y="512" width="340" height="52" rx="6" fill="#ffffff" stroke="#3d4f63" stroke-width="1.25"/>
+  <text x="226" y="532" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#1a2332">validate_decision</text>
+  <text x="226" y="550" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" fill="#5c6b7a">catalog, registries, and loop limits</text>
+
+  <line x1="396" y1="538" x2="420" y2="538" stroke="#3d4f63" stroke-width="1.25" marker-end="url(#arrow)"/>
+
+  <rect x="422" y="512" width="340" height="52" rx="6" fill="#f7efe4" stroke="#8a5a24" stroke-width="1.25"/>
+  <text x="592" y="532" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#1a2332">GovernancePolicy</text>
+  <text x="592" y="550" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" fill="#8a5a24">after validation, before any tool or action</text>
+
+  <line x1="762" y1="538" x2="786" y2="538" stroke="#3d4f63" stroke-width="1.25" marker-end="url(#arrow)"/>
+
+  <rect x="788" y="512" width="336" height="52" rx="6" fill="#ffffff" stroke="#3d4f63" stroke-width="1.25"/>
+  <text x="956" y="532" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" fill="#5c6b7a">Gemini, memory, and strategies</text>
+  <text x="956" y="550" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#1a2332">cannot grant approval</text>
+
+  <line x1="592" y1="564" x2="592" y2="580" stroke="#3d4f63" stroke-width="1.25"/>
+
+  <rect x="56" y="584" width="340" height="48" rx="6" fill="#eaf3ea" stroke="#2f6b3a" stroke-width="1.25"/>
+  <text x="226" y="604" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#1a2332">AUTO_APPROVE</text>
+  <text x="226" y="620" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" fill="#5c6b7a">observe / delegate / complete</text>
+
+  <rect x="422" y="584" width="340" height="48" rx="6" fill="#f8ead8" stroke="#8a5a24" stroke-width="1.25"/>
+  <text x="592" y="604" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#1a2332">REQUIRE_APPROVAL</text>
+  <text x="592" y="620" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" fill="#5c6b7a">dataset remediations</text>
+
+  <rect x="788" y="584" width="336" height="48" rx="6" fill="#f4f6f8" stroke="#5c6b7a" stroke-width="1.25"/>
+  <text x="956" y="604" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#1a2332">DENY</text>
+  <text x="956" y="620" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" fill="#5c6b7a">record and replan; do not execute</text>
+
+  <line x1="592" y1="632" x2="592" y2="648" stroke="#8a5a24" stroke-width="1.25" marker-end="url(#arrowAmber)"/>
+
+  <rect x="422" y="650" width="340" height="48" rx="6" fill="#f8ead8" stroke="#8a5a24" stroke-width="1.25"/>
+  <text x="592" y="668" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#1a2332">Human approval path</text>
+  <text x="592" y="686" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" fill="#3d4f63">durable ApprovalRequest, human fingerprint approval, then resume</text>
+
+  <rect x="56" y="712" width="1068" height="40" rx="6" fill="#eaf3ea" stroke="#2f6b3a" stroke-width="1.5"/>
+  <text x="590" y="728" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#1a2332">ATLAS-controlled execution</text>
+  <text x="590" y="744" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" fill="#2f6b3a">allowlisted specialists, dataset tools, remediations, and FETCH_URL only  -  never Gemini</text>
+
+  <line x1="226" y1="632" x2="226" y2="712" stroke="#2f6b3a" stroke-width="1.25" marker-end="url(#arrowGreen)"/>
+  <line x1="592" y1="698" x2="592" y2="712" stroke="#8a5a24" stroke-width="1.25" marker-end="url(#arrowAmber)"/>
+
+  <line x1="590" y1="752" x2="590" y2="776" stroke="#2f6b3a" stroke-width="1.25" marker-end="url(#arrowGreen)"/>
+
+  <!-- 5. Specialists / tools -->
+  <text x="40" y="768" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" font-weight="600" letter-spacing="0.08em" fill="#5c6b7a">5. SPECIALISTS AND DATASET WORK  -  EXECUTED ONLY BY ATLAS</text>
+
+  <rect x="40" y="778" width="255" height="52" rx="6" fill="#ffffff" stroke="#2f6b3a" stroke-width="1.25"/>
+  <text x="167" y="798" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#1a2332">DATA_ANALYST</text>
+  <text x="167" y="816" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" fill="#5c6b7a">profile, missing, duplicates</text>
+
+  <rect x="307" y="778" width="255" height="52" rx="6" fill="#ffffff" stroke="#2f6b3a" stroke-width="1.25"/>
+  <text x="434" y="798" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#1a2332">INVESTIGATOR</text>
+  <text x="434" y="816" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" fill="#5c6b7a">inspect_column only</text>
+
+  <rect x="574" y="778" width="255" height="52" rx="6" fill="#ffffff" stroke="#2f6b3a" stroke-width="1.25"/>
+  <text x="701" y="798" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#1a2332">REMEDIATOR</text>
+  <text x="701" y="816" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" fill="#5c6b7a">working-copy actions after approval</text>
+
+  <rect x="841" y="778" width="299" height="52" rx="6" fill="#ffffff" stroke="#2f6b3a" stroke-width="1.25"/>
+  <text x="990" y="798" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#1a2332">REPORTER</text>
+  <text x="990" y="816" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" fill="#5c6b7a">synthesis only, no tools</text>
+
+  <line x1="590" y1="830" x2="590" y2="848" stroke="#3d4f63" stroke-width="1.25" marker-end="url(#arrow)"/>
+
+  <rect x="40" y="850" width="1100" height="52" rx="6" fill="#eaf3ea" stroke="#2f6b3a" stroke-width="1.25"/>
+  <text x="590" y="871" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#1a2332">Dataset profiling  /  quality analysis  /  approved remediation on working copy  /  verified evidence  /  final report</text>
+  <text x="590" y="889" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" fill="#1f6f64">Structured evidence returns to the supervisor for the next Gemini/ADK decision. Raw CSV and raw HTML are never sent to the model.</text>
+
+  <path d="M 1140 876 L 1160 876 L 1160 380 L 1140 380" fill="none" stroke="#1f6f64" stroke-width="1.25" stroke-dasharray="4 3" marker-end="url(#arrowTeal)"/>
+
+  <!-- 6. Persistence -->
+  <text x="40" y="922" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" font-weight="600" letter-spacing="0.08em" fill="#5c6b7a">6. PERSISTENCE AND INFRASTRUCTURE</text>
+
+  <rect x="40" y="924" width="545" height="92" rx="8" fill="#eef0f3" stroke="#c5cdd6" stroke-width="1.25"/>
+  <text x="312" y="946" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#1a2332">Local (default)</text>
+  <text x="312" y="966" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" fill="#3d4f63">SQLite  +  local filesystem  +  in-process worker</text>
+  <text x="312" y="984" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" fill="#3d4f63">Gemini 3.5 Flash via Google ADK still runs with GOOGLE_API_KEY or Vertex credentials</text>
+  <text x="312" y="1002" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" fill="#5c6b7a">No Google Cloud project required for local development</text>
+
+  <rect x="605" y="924" width="535" height="92" rx="8" fill="#e8eef6" stroke="#3d5a80" stroke-width="1.25"/>
+  <text x="872" y="946" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#1a2332">Cloud (implemented, deployable)</text>
+  <text x="872" y="966" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" fill="#3d4f63">Cloud Run API  +  Cloud Run worker  +  Pub/Sub</text>
+  <text x="872" y="984" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" fill="#3d4f63">Firestore  +  Google Cloud Storage  +  Gemini API or Vertex AI</text>
+  <text x="872" y="1002" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" fill="#5c6b7a">Documented in docs/CLOUD.md. Not claimed as already deployed from this repository.</text>
+
+  <text x="40" y="1040" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" fill="#5c6b7a">Same codebase locally and on Cloud Run. Backends are selected with ATLAS_RUNTIME_MODE. Original uploaded CSV stays immutable; remediations write a working copy and must pass postcondition verification.</text>
+  <text x="40" y="1058" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11" fill="#5c6b7a">FETCH_URL is fail-closed on an empty domain allowlist. ADK FunctionTools are not on the production execution path.</text>
+</svg>

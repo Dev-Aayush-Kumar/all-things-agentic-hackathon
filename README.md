@@ -40,6 +40,16 @@ That loop:
 
 ## Architecture
 
+![ATLAS architecture](docs/architecture.svg)
+
+The diagram is the current implementation, not a future design.
+
+- **Gemini 3.5 Flash via Google ADK** is the supervisor decision-maker when credentials are configured (`REAL_GEMINI_ADK`). It returns a typed JSON decision (`DELEGATE`, `OBSERVE`, `ACTION`, `EXTERNAL`, `COMPLETE`). It does not execute tools, HTTP, shell, or filesystem operations.
+- **ATLAS** validates that decision, applies `GovernancePolicy`, and is the only component that runs specialists, dataset tools, remediations, or `FETCH_URL`.
+- **Cloud Run API / worker, Firestore, Cloud Storage, and Pub/Sub** are implemented in this repository and documented in [docs/CLOUD.md](docs/CLOUD.md). They are **not claimed as already deployed** from this repo. The same loop runs locally with SQLite, local files, and in-process dispatch. Gemini still works in local mode when `GOOGLE_API_KEY` or Vertex credentials are present.
+
+Compact loop (same path as the diagram):
+
 ```
 MISSION GOAL + STRUCTURED CONTEXT
         ↓
@@ -458,6 +468,7 @@ atlas/
 ├── main.py               # API entrypoint
 └── worker.py             # Cloud Run worker entrypoint
 
+docs/architecture.svg     # Current runtime architecture diagram
 docs/CLOUD.md             # Cloud Run provisioning and deploy commands
 Dockerfile                # Single image for API and worker
 ```
