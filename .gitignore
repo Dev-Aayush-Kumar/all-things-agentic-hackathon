@@ -44,6 +44,7 @@ ENV/
 .coverage
 htmlcov/
 .tox/
+artifacts/
 
 # ATLAS local data
 data/

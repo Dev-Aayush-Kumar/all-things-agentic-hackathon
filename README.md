@@ -199,9 +199,9 @@ Hackathon requirement: **Gemini 3.5 or newer**.
 - Model name is configured with `GEMINI_MODEL` (default `gemini-3.5-flash`).
 - ATLAS never silently replaces a configured model with an older one.
 - If the configured model is below 3.5, diagnostics set `gemini_meets_minimum=false` and a warning is logged. The exact name is still sent to the SDK.
-- When credentials exist, planning, tool selection, supervisor decisions, and finding interpretation use Google ADK (`REAL_GEMINI_ADK` / `GEMINI_ADK`).
+- When credentials exist, supervisor decisions and finding interpretation use Google ADK (`REAL_GEMINI_ADK` / `GEMINI_ADK`). Dataset investigation is driven by that supervisor loop; ATLAS does not make a separate Gemini planning call first. Missions without a dataset still use the mission planner (ADK or local fallback) for generic steps.
 - The supervisor asks Gemini for a **typed** decision (`DELEGATE`, `OBSERVE`, `ACTION`, `EXTERNAL`, `COMPLETE`). Malformed output is rejected, not guessed.
-- Tool, action, and external **execution** stay inside ATLAS. The model cannot run arbitrary tools, fetch arbitrary URLs, read files, write the source dataset, or bypass the allowlists.
+- Tool, action, and external **execution** stay inside ATLAS. Gemini/ADK does not run FunctionTools against the dataset. The model cannot run arbitrary tools, fetch arbitrary URLs, read files, write the source dataset, or bypass the allowlists.
 - Gemini proposing an action is not authorization. ATLAS still runs ActionRegistry, parameter checks, execution, and postcondition verification.
 - Structured evidence (counts, findings, verification) is fed back into the next reasoning iteration. The raw CSV is not sent to Gemini.
 - When Gemini is unavailable, `LocalDecisionMaker` implements the same typed contract from deterministic policy and is labeled `LOCAL_FALLBACK`. It is never labeled as Gemini.
@@ -209,7 +209,7 @@ Hackathon requirement: **Gemini 3.5 or newer**.
 
 Transports:
 
-- Gemini API: `GOOGLE_API_KEY`
+- Gemini API: `GOOGLE_API_KEY` (from the process environment or `.env`; ATLAS copies a Settings key into `os.environ` for google-genai/ADK and never logs it)
 - Vertex AI: `GOOGLE_GENAI_USE_VERTEXAI=true` and `GOOGLE_CLOUD_PROJECT`
 
 Outbound Gemini TLS uses the **native OS certificate store** via `truststore` (injected at ATLAS process start). This avoids Python/httpx `CERTIFICATE_VERIFY_FAILED` on Windows when certifi does not include the local issuer. Certificate verification stays enabled; ATLAS does not set `verify=False` or `SSL_CERT_FILE`. Local fallback still runs when Gemini credentials are absent.
@@ -477,6 +477,8 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
+`requirements.txt` is the documented install path. The same runtime libraries are declared in `pyproject.toml`, so `pip install -e .` is equivalent for running the app. Tests need the extra packages in `requirements.txt` or `pip install -e ".[dev]"`.
+
 Do not commit `.env` or service-account JSON files. Cloud Run should use its service identity. Local cloud experiments should use Application Default Credentials (`gcloud auth application-default login`).
 
 ## Local development
@@ -504,8 +506,10 @@ To use real Gemini locally without Cloud backends:
 ATLAS_RUNTIME_MODE=local
 GOOGLE_API_KEY=your-api-key-here
 GEMINI_MODEL=gemini-3.5-flash
-PLANNER_BACKEND=auto
+PLANNER_BACKEND=gemini
 ```
+
+`PLANNER_BACKEND=gemini` is an alias of `adk`. If credentials are missing, ATLAS still uses the local fallback and never labels it as Gemini.
 
 ## API usage
 
@@ -590,14 +594,22 @@ The default suite uses the local fallback, a temp SQLite database, temp uploads,
 pytest -v
 ```
 
+Opt-in live Gemini end-to-end mission (requires `GOOGLE_API_KEY` or Vertex credentials; never runs in the default suite):
+
+```bash
+# Windows PowerShell
+$env:ATLAS_RUN_LIVE_GEMINI_TESTS="1"
+.\.venv\Scripts\python.exe -m pytest tests/integration/test_live_gemini.py -q --tb=short
+```
+
 Opt-in live Google Cloud checks (only if you have credentials and intend to use a real project):
 
 ```bash
 # Windows PowerShell
-$env:ATLAS_LIVE_CLOUD="1"; pytest -v tests/integration
+$env:ATLAS_LIVE_CLOUD="1"; pytest -v tests/integration/test_live_cloud.py
 ```
 
-If that flag is unset, those tests are skipped.
+If those flags are unset, those tests are skipped.
 
 ## What is implemented
 

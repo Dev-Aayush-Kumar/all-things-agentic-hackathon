@@ -37,24 +37,36 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
 @pytest.fixture(autouse=True)
-def test_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+def test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> Iterator[Path]:
     """Configure isolated test environment for each test."""
+    live_gemini = request.node.get_closest_marker("live_gemini") is not None
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
         db_path = Path(tmpdir) / "test_atlas.db"
         upload_dir = Path(tmpdir) / "uploads"
-        monkeypatch.setenv("PLANNER_BACKEND", "local")
         monkeypatch.setenv("ATLAS_RUNTIME_MODE", "local")
         monkeypatch.setenv("ATLAS_PERSISTENCE", "sqlite")
         monkeypatch.setenv("ATLAS_STORAGE", "local")
         monkeypatch.setenv("ATLAS_DISPATCHER", "local")
-        monkeypatch.setenv("GEMINI_MODEL", "gemini-3.5-flash")
+        monkeypatch.setenv("GEMINI_MODEL", os.environ.get("GEMINI_MODEL") or "gemini-3.5-flash")
         monkeypatch.setenv("ATLAS_STEP_DELAY_SECONDS", "0")
         monkeypatch.setenv("ATLAS_EXECUTION_HEARTBEAT_SECONDS", "1.0")
-        monkeypatch.setenv("ATLAS_EXECUTION_LEASE_SECONDS", "120")
-        monkeypatch.setenv("GOOGLE_API_KEY", "")
-        monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "false")
         monkeypatch.setenv("ATLAS_DATABASE_PATH", str(db_path))
         monkeypatch.setenv("ATLAS_UPLOAD_DIR", str(upload_dir))
+        if live_gemini:
+            monkeypatch.setenv("PLANNER_BACKEND", "gemini")
+            monkeypatch.setenv("ATLAS_EXECUTION_LEASE_SECONDS", "300")
+            monkeypatch.setenv("ATLAS_AGENT_MAX_RUNTIME_SECONDS", "240")
+            monkeypatch.setenv("ATLAS_GEMINI_TIMEOUT_SECONDS", "60")
+            monkeypatch.setenv("ATLAS_MEMORY_ENABLED", "false")
+            monkeypatch.setenv("ATLAS_STRATEGY_ENABLED", "true")
+            monkeypatch.setenv("ATLAS_GOVERNANCE_ENABLED", "true")
+            monkeypatch.setenv("ATLAS_FETCH_URL_ENABLED", "false")
+            # Keep GOOGLE_API_KEY / Vertex credentials from the real environment.
+        else:
+            monkeypatch.setenv("PLANNER_BACKEND", "local")
+            monkeypatch.setenv("ATLAS_EXECUTION_LEASE_SECONDS", "120")
+            monkeypatch.setenv("GOOGLE_API_KEY", "")
+            monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "false")
         get_settings.cache_clear()
         get_app_settings.cache_clear()
         get_mission_service.cache_clear()

@@ -1,5 +1,6 @@
 """Environment-based application settings."""
 
+import os
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
@@ -92,8 +93,11 @@ class Settings(BaseSettings):
     )
     gemini_model: str = Field(default=DEFAULT_GEMINI_MODEL, alias="GEMINI_MODEL")
 
-    # Planner override (auto | adk | local)
+    # Planner override (auto | adk | gemini | local)
     planner_backend: str = Field(default="auto", alias="PLANNER_BACKEND")
+    gemini_timeout_seconds: float = Field(
+        default=60.0, alias="ATLAS_GEMINI_TIMEOUT_SECONDS"
+    )
 
     # Persistence
     persistence_backend: str = Field(default="auto", alias="ATLAS_PERSISTENCE")
@@ -246,9 +250,10 @@ class Settings(BaseSettings):
     @property
     def resolved_planner_backend(self) -> PlannerBackend:
         """Determine which planner backend to use."""
-        if self.planner_backend.lower() == "local":
+        choice = self.planner_backend.lower().strip()
+        if choice == "local":
             return PlannerBackend.LOCAL_FALLBACK
-        if self.planner_backend.lower() == "adk":
+        if choice in {"adk", "gemini"}:
             return PlannerBackend.ADK
         if self.google_api_key or (
             self.google_genai_use_vertexai and self.google_cloud_project
@@ -335,8 +340,36 @@ class Settings(BaseSettings):
             "governance_enabled": self.governance_enabled,
         }
 
+    def export_adk_runtime_env(self) -> None:
+        """Copy Settings credentials into os.environ for google-genai / ADK.
+
+        pydantic-settings can load ``GOOGLE_API_KEY`` from ``.env`` into this
+        object without putting it on the process environment. google-genai only
+        reads ``os.environ``. Never logs values. Does not overwrite a non-blank
+        process value already present.
+        """
+        if self.google_api_key:
+            _set_env_if_blank("GOOGLE_API_KEY", self.google_api_key)
+        if self.google_genai_use_vertexai:
+            _set_env_if_blank("GOOGLE_GENAI_USE_VERTEXAI", "true")
+        if self.google_cloud_project:
+            _set_env_if_blank("GOOGLE_CLOUD_PROJECT", self.google_cloud_project)
+        if self.google_cloud_location:
+            _set_env_if_blank("GOOGLE_CLOUD_LOCATION", self.google_cloud_location)
+
+
+def _set_env_if_blank(name: str, value: str) -> None:
+    text = str(value).strip()
+    if not text:
+        return
+    current = os.environ.get(name)
+    if current is None or not str(current).strip():
+        os.environ[name] = text
+
 
 @lru_cache
 def get_settings() -> Settings:
-    """Return cached settings instance."""
-    return Settings()
+    """Return cached settings instance and expose ADK credentials to the process."""
+    settings = Settings()
+    settings.export_adk_runtime_env()
+    return settings

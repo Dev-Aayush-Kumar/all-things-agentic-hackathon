@@ -135,3 +135,30 @@ def test_diagnostics_never_include_api_key() -> None:
     assert "super-secret-key-value" not in dumped
     assert "google_api_key" not in dumped
     assert "GOOGLE_API_KEY" not in dumped
+
+
+def test_settings_import_is_not_blocked_by_agent_package_cycle() -> None:
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from atlas.config.settings import Settings; Settings(_env_file=None)",
+        ],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_agent_package_still_exports_factory_helpers() -> None:
+    import atlas.agent as agent
+    from atlas.agent.factory import create_mission_planner
+
+    assert agent.create_mission_planner is create_mission_planner

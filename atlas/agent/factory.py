@@ -30,6 +30,7 @@ def create_mission_planner(settings: Settings) -> MissionPlanner:
             )
             return LocalFallbackPlanner()
 
+        settings.export_adk_runtime_env()
         logger.info(
             "Using %s planner with model=%s transport=%s",
             "REAL_GEMINI_ADK",
@@ -59,6 +60,7 @@ def create_investigation_reasoner(settings: Settings) -> InvestigationReasoner:
                 "falling back to local development reasoner."
             )
             return LocalFallbackReasoner()
+        settings.export_adk_runtime_env()
         logger.info(
             "Using REAL_GEMINI_ADK investigation reasoner with model=%s",
             settings.gemini_model,
@@ -74,6 +76,7 @@ async def resolve_initial_tools(goal: str, settings: Settings) -> tuple[list[str
     backend = settings.resolved_planner_backend
     if backend == PlannerBackend.ADK and settings.adk_configured:
         try:
+            settings.export_adk_runtime_env()
             selected = await select_tools_with_adk(goal, settings)
             logger.info("REAL_GEMINI_ADK selected investigation tools: %s", selected)
             return selected, PlannerSource.GEMINI_ADK
@@ -92,12 +95,17 @@ def create_decision_maker(settings: Settings):
     """Create the supervisor decision-maker. Local fallback is never labeled Gemini."""
     backend = settings.resolved_planner_backend
     if backend == PlannerBackend.ADK and settings.adk_configured:
+        settings.export_adk_runtime_env()
         logger.info(
-            "Using REAL_GEMINI_ADK supervisor decision-maker with model=%s",
+            "Using REAL_GEMINI_ADK supervisor decision-maker with model=%s requested_backend=%s",
             settings.gemini_model,
+            settings.planner_backend,
         )
         return AdkDecisionMaker(settings)
-    logger.info("Using LOCAL_FALLBACK supervisor decision-maker")
+    logger.info(
+        "Using LOCAL_FALLBACK supervisor decision-maker requested_backend=%s",
+        settings.planner_backend,
+    )
     return LocalDecisionMaker()
 
 
@@ -108,6 +116,7 @@ def create_memory_extractor(settings: Settings):
 
     backend = settings.resolved_planner_backend
     if backend == PlannerBackend.ADK and settings.adk_configured:
+        settings.export_adk_runtime_env()
         logger.info(
             "Using REAL_GEMINI_ADK memory extractor with model=%s",
             settings.gemini_model,

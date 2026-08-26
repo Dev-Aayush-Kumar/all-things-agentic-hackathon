@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from atlas import __version__
 from atlas.api.dependencies import get_app_settings
 from atlas.domain.models import HealthResponse
+from atlas.runtime.tls import native_tls_configured
 
 router = APIRouter(tags=["health"])
 
@@ -28,6 +29,7 @@ async def health_check() -> HealthResponse:
         storage_backend=settings.resolved_storage.value,
         dispatcher_backend=settings.resolved_dispatcher.value,
         adk_configured=settings.adk_configured,
+        native_tls=native_tls_configured(),
     )
 
 

@@ -9,10 +9,13 @@ import os
 
 import pytest
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("ATLAS_LIVE_CLOUD") != "1",
-    reason="Live Google Cloud tests are opt-in via ATLAS_LIVE_CLOUD=1",
-)
+pytestmark = [
+    pytest.mark.live_cloud,
+    pytest.mark.skipif(
+        os.environ.get("ATLAS_LIVE_CLOUD") != "1",
+        reason="Live Google Cloud tests are opt-in via ATLAS_LIVE_CLOUD=1",
+    ),
+]
 
 
 def test_application_default_credentials_available() -> None:

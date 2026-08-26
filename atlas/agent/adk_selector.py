@@ -1,7 +1,10 @@
-"""ADK-backed tool selection for the agent loop.
+"""ADK-backed tool selection for the local-policy supervisor path.
 
-When Gemini credentials are configured, the model proposes which allowlisted
-tools to run. Invalid tools are dropped. Facts are still measured by Python tools.
+When Gemini credentials are configured, ``AdkDecisionMaker`` drives the
+initial plan and this selector is not used. ``resolve_initial_tools`` still
+calls ``select_tools_with_adk`` when a decision-maker does not drive the
+initial plan. Facts are always measured by ATLAS Python tools, not by ADK
+FunctionTool callbacks.
 """
 
 from __future__ import annotations
@@ -84,54 +87,6 @@ async def select_tools_with_adk(goal: str, settings: Settings) -> list[str]:
     except Exception:
         logger.exception("ADK tool selection failed")
         raise
-
-
-def build_adk_investigator_agent(settings: Settings):
-    """Build an ADK Agent wired to FunctionTools. Used when credentials exist.
-
-    Tool functions are wrappers that refuse to run without a bound context; the
-    production loop still executes tools locally so evidence and limits stay
-    under ATLAS control. This constructor verifies the ADK 2.x tools API.
-    """
-    from google.adk import Agent
-    from google.adk.tools import FunctionTool
-
-    def profile_dataset() -> dict[str, str]:
-        return {"status": "bound_at_runtime"}
-
-    def analyze_missing_values() -> dict[str, str]:
-        return {"status": "bound_at_runtime"}
-
-    def analyze_duplicates() -> dict[str, str]:
-        return {"status": "bound_at_runtime"}
-
-    def analyze_type_format() -> dict[str, str]:
-        return {"status": "bound_at_runtime"}
-
-    def analyze_outliers() -> dict[str, str]:
-        return {"status": "bound_at_runtime"}
-
-    def analyze_consistency() -> dict[str, str]:
-        return {"status": "bound_at_runtime"}
-
-    def inspect_column(column_name: str) -> dict[str, str]:
-        return {"status": "bound_at_runtime", "column_name": column_name}
-
-    return Agent(
-        name="atlas_investigator",
-        model=settings.gemini_model,
-        instruction=SELECTOR_INSTRUCTION,
-        description="ATLAS investigator with allowlisted data-quality tools.",
-        tools=[
-            FunctionTool(profile_dataset),
-            FunctionTool(analyze_missing_values),
-            FunctionTool(analyze_duplicates),
-            FunctionTool(analyze_type_format),
-            FunctionTool(analyze_outliers),
-            FunctionTool(analyze_consistency),
-            FunctionTool(inspect_column),
-        ],
-    )
 
 
 def _final_text(events: list[Any]) -> str:

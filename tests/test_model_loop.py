@@ -378,7 +378,9 @@ async def test_model_failure_falls_back_without_mislabelling(tmp_path: Path) -> 
     raw = (FIXTURES_DIR / "clean_numeric.csv").read_bytes()
     storage = LocalFileStorage(tmp_path)
     await storage.save("source.csv", raw)
-    decider = ScriptedDecisionMaker([RuntimeError("adk timeout")])
+    decider = ScriptedDecisionMaker(
+        [RuntimeError("adk timeout key=AIzaSyFakeTestKeyValueNotReal00")]
+    )
     mission = Mission(goal="Analyze quality problems in this dataset.", dataset_id="ds")
     mission.working_copy = WorkingCopyState(
         source_dataset_id="ds",
@@ -410,6 +412,17 @@ async def test_model_failure_falls_back_without_mislabelling(tmp_path: Path) -> 
     assert accepted_local
     assert mission.investigation_report is not None
     assert mission.investigation_report.reasoning_source == PlannerSource.LOCAL_FALLBACK
+    event_types = {event.type for event in mission.events}
+    assert EventType.MODEL_DECISION_FALLBACK in event_types
+    fallback = next(
+        event for event in mission.events if event.type == EventType.MODEL_DECISION_FALLBACK
+    )
+    assert fallback.metadata["failure_category"] == "timeout"
+    assert fallback.metadata["fallback_source"] == PlannerSource.LOCAL_FALLBACK.value
+    rejected = next(event for event in mission.events if event.type == EventType.MODEL_DECISION_REJECTED)
+    assert "AIzaSyFakeTestKeyValueNotReal00" not in (failed.rejection_reason or "")
+    assert "AIzaSyFakeTestKeyValueNotReal00" not in str(rejected.metadata)
+    assert "[REDACTED]" in (rejected.metadata.get("error") or "")
 
 
 @pytest.mark.asyncio

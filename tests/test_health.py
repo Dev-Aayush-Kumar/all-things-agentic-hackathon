@@ -32,6 +32,7 @@ async def test_health_returns_healthy(client: AsyncClient) -> None:
     assert payload["storage_backend"] == "local_fs"
     assert payload["dispatcher_backend"] == "local_async"
     assert payload["adk_configured"] is False
+    assert payload["native_tls"] is True
     assert "google_api_key" not in payload
     assert "GOOGLE_API_KEY" not in response.text
 

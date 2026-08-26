@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 from typing import Any
 
+from atlas.agent.gemini_schema import gemini_developer_output_schema
 from atlas.config.settings import Settings
 from atlas.domain.enums import PlannerSource
 from atlas.domain.exceptions import ModelDecisionError
@@ -68,7 +70,13 @@ class AdkDecisionMaker:
         safe_context = {
             key: value for key, value in context.items() if not key.startswith("_")
         }
-        raw = await self._invoke_adk(safe_context)
+        try:
+            raw = await asyncio.wait_for(
+                self._invoke_adk(safe_context),
+                timeout=self._settings.gemini_timeout_seconds,
+            )
+        except TimeoutError as exc:
+            raise ModelDecisionError("Gemini decision timed out") from exc
         return parse_model_decision(_extract_json(raw))
 
     async def _invoke_adk(self, context: dict[str, Any]) -> str:
@@ -85,8 +93,9 @@ class AdkDecisionMaker:
             "instruction": DECIDER_INSTRUCTION,
             "description": "Proposes the next typed ATLAS supervisor decision.",
         }
+        output_schema = gemini_developer_output_schema(ModelDecision)
         try:
-            agent = Agent(**kwargs, output_schema=ModelDecision)
+            agent = Agent(**kwargs, output_schema=output_schema)
         except TypeError:
             agent = Agent(**kwargs)
         app = App(name="atlas_supervisor_decider_app", root_agent=agent)

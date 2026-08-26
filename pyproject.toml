@@ -4,7 +4,27 @@ version = "0.12.0"
 description = "ATLAS - Autonomous operations agent for Google All Things Agentic Hackathon 2026"
 requires-python = ">=3.10"
 dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.6.0",
+    "google-adk>=1.26.0",
+    "google-genai>=1.0.0",
+    "google-cloud-firestore>=2.21.0",
+    "google-cloud-storage>=2.19.0",
+    "google-cloud-pubsub>=2.27.0",
+    "python-dotenv>=1.0.0",
+    "aiosqlite>=0.20.0",
+    "python-multipart>=0.0.9",
+    "pandas>=2.2.0",
     "truststore>=0.10.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "httpx>=0.28.0",
 ]
 
 [tool.pytest.ini_options]
@@ -13,4 +33,8 @@ testpaths = ["tests"]
 pythonpath = ["."]
 filterwarnings = [
     "ignore::DeprecationWarning",
+]
+markers = [
+    "live_gemini: opt-in live Gemini mission (ATLAS_RUN_LIVE_GEMINI_TESTS=1)",
+    "live_cloud: opt-in live Google Cloud checks (ATLAS_LIVE_CLOUD=1)",
 ]

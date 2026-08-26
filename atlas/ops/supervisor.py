@@ -49,6 +49,7 @@ from atlas.ops.planning import (
     task_exists,
 )
 from atlas.ops.reasoning_context import build_reasoning_context
+from atlas.runtime.safe_errors import describe_planner_failure
 from atlas.storage.base import DatasetStorage
 from atlas.ops.registry import CAPABILITY_SYNTHESIZE, AgentRegistry, default_registry
 from atlas.ops.specialists import build_specialists
@@ -353,33 +354,64 @@ class Supervisor:
             {
                 "iteration": mission.reasoning_iteration,
                 "source": self._decision_maker.source.value,
+                "planner_label": self._settings.planner_label,
             },
         )
         source = self._decision_maker.source
         decision = None
+        used_fallback = False
         try:
             if source == PlannerSource.GEMINI_ADK:
                 mission.model_call_count += 1
             decision = await self._decision_maker.decide(context)
         except Exception as exc:
-            logger.exception("Decision-maker failed mission=%s", mission.mission_id)
+            diagnostics = describe_planner_failure(exc)
+            category = diagnostics["failure_category"]
+            safe_error = diagnostics["error"]
+            logger.warning(
+                "Decision-maker failed mission=%s source=%s category=%s "
+                "stage=%s class=%s http_status=%s provider_status=%s",
+                mission.mission_id,
+                source.value,
+                category,
+                diagnostics["failure_stage"],
+                diagnostics["exception_class"],
+                diagnostics["http_status"],
+                diagnostics["provider_status"],
+            )
+            logger.debug("Decision-maker failure detail", exc_info=True)
             self._store_decision(
                 mission,
                 source=source,
                 decision=None,
                 accepted=False,
-                rejection_reason=str(exc),
+                rejection_reason=safe_error,
                 fingerprint="",
             )
             _add_event(
                 mission,
                 EventType.MODEL_DECISION_REJECTED,
                 "Model decision failed",
-                {"error": str(exc), "source": source.value},
+                {
+                    "error": safe_error,
+                    "source": source.value,
+                    **diagnostics,
+                },
             )
             if source == PlannerSource.GEMINI_ADK:
+                _add_event(
+                    mission,
+                    EventType.MODEL_DECISION_FALLBACK,
+                    "Gemini decision-maker failed; using local fallback",
+                    {
+                        "source": PlannerSource.GEMINI_ADK.value,
+                        "fallback_source": PlannerSource.LOCAL_FALLBACK.value,
+                        **diagnostics,
+                    },
+                )
                 decision = self._local_fallback_decider.decide_from_workspace(workspace)
                 source = PlannerSource.LOCAL_FALLBACK
+                used_fallback = True
             else:
                 return False
         assert decision is not None
@@ -391,6 +423,7 @@ class Supervisor:
                 "decision": decision.decision.value,
                 "reason": decision.reason,
                 "source": source.value,
+                "fallback": used_fallback,
             },
         )
         try:

@@ -1123,6 +1123,7 @@ class HealthResponse(BaseModel):
     storage_backend: str
     dispatcher_backend: str
     adk_configured: bool
+    native_tls: bool = False
 
 
 DelegationPlan.model_rebuild()

@@ -11,7 +11,7 @@ from atlas.agent.tools import ToolContext
 from atlas.config.settings import Settings
 from atlas.domain.enums import EventType, ExecutionState, MissionStatus, StepStatus
 from atlas.domain.exceptions import DatasetParseError, StaleExecutionError, WaitingForApproval
-from atlas.domain.models import Mission, MissionEvent, WorkingCopyState, utc_now
+from atlas.domain.models import ExecutionPlan, Mission, MissionEvent, PlanStep, WorkingCopyState, utc_now
 from atlas.execution.context import ExecutionContext
 from atlas.investigation.parser import parse_csv_bytes
 from atlas.persistence.base import MissionRepository
@@ -56,6 +56,26 @@ class MissionWorkflowRunner:
         self._experience_repository = experience_repository
         self._strategy_repository = strategy_repository
         self._approval_repository = approval_repository
+        self._decision_maker_instance = None
+
+    def _get_decision_maker(self):
+        """Supervisor decision-maker. Cached so planning and execution share one instance."""
+        if self._decision_maker_instance is not None:
+            return self._decision_maker_instance
+        from atlas.agent.factory import create_decision_maker
+        from atlas.agent.local_decider import LocalDecisionMaker
+
+        if self._settings is None:
+            self._decision_maker_instance = LocalDecisionMaker()
+        else:
+            self._decision_maker_instance = create_decision_maker(self._settings)
+        return self._decision_maker_instance
+
+    def _supervisor_drives_initial_plan(self, mission: Mission) -> bool:
+        """Dataset missions with a model-driven decider skip the generic planner call."""
+        if not mission.dataset_id:
+            return False
+        return bool(self._get_decision_maker().drives_initial_plan)
 
     async def run(
         self,
@@ -92,15 +112,26 @@ class MissionWorkflowRunner:
     async def _plan(self, mission: Mission) -> None:
         mission.status = MissionStatus.PLANNING
         mission.touch()
+        supervisor_driven = self._supervisor_drives_initial_plan(mission)
         self._add_event(
             mission,
             EventType.PLANNING_STARTED,
             "Planning started",
-            {"planner": self._planner.source_name},
+            {
+                "planner": (
+                    "SUPERVISOR_DECISION_LOOP"
+                    if supervisor_driven
+                    else self._planner.source_name
+                ),
+                "deferred_to_supervisor": supervisor_driven,
+            },
         )
         await self._persist(mission)
 
-        plan = await self._planner.create_plan(mission.goal, mission.dataset_id)
+        if supervisor_driven:
+            plan = _placeholder_supervisor_plan(mission, self._get_decision_maker().source)
+        else:
+            plan = await self._planner.create_plan(mission.goal, mission.dataset_id)
         mission.execution_plan = plan
         self._add_event(
             mission,
@@ -109,6 +140,7 @@ class MissionWorkflowRunner:
             {
                 "planner_source": plan.planner_source.value,
                 "step_count": len(plan.steps),
+                "deferred_to_supervisor": supervisor_driven,
             },
         )
         mission.touch()
@@ -221,10 +253,9 @@ class MissionWorkflowRunner:
         )
         await self._persist(mission)
 
-        from atlas.agent.factory import create_decision_maker
         from atlas.ops.supervisor import Supervisor
 
-        decision_maker = create_decision_maker(self._settings)
+        decision_maker = self._get_decision_maker()
         if decision_maker.drives_initial_plan:
             selected_tools: list[str] | None = None
             plan_source = decision_maker.source
@@ -391,3 +422,26 @@ class MissionWorkflowRunner:
                 metadata=metadata or {},
             )
         )
+
+
+def _placeholder_supervisor_plan(mission: Mission, source) -> ExecutionPlan:
+    """Satisfy the lifecycle plan slot without a second Gemini call.
+
+    Dataset investigation is driven by the supervisor decision-maker. Generic
+    missions without a dataset still use MissionPlanner.create_plan.
+    """
+    return ExecutionPlan(
+        steps=[
+            PlanStep(
+                id="step_1",
+                title="Supervisor-driven investigation",
+                description=(
+                    "The supervisor decision-maker will choose typed "
+                    "DELEGATE, OBSERVE, ACTION, EXTERNAL, or COMPLETE steps. "
+                    "This placeholder is not executed as a generic step list."
+                ),
+            )
+        ],
+        planner_source=source,
+        summary=f"Supervisor-driven investigation for: {mission.goal}",
+    )
